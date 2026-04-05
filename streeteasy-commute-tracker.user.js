@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         StreetEasy Commute Tracker
 // @namespace    https://streeteasy.com/
-// @version      2.0.1
+// @version      2.0.2
 // @description  Shows walking distance and Google Maps transit link to 12 W 39th St
 // @match        https://streeteasy.com/building/*
 // @match        https://streeteasy.com/rental/*
@@ -128,10 +128,14 @@
   }
 
   async function getWalkingRoute(fromLat, fromLon, toLat, toLon) {
-    const url = `${OSRM_BASE}/route/v1/foot/${fromLon},${fromLat};${toLon},${toLat}?overview=false`;
+    // Use driving profile for road distance (foot profile on public OSRM returns car times anyway).
+    // We override duration ourselves at 1.4 m/s (~3.1 mph), matching OSRM's pedestrian model.
+    const url = `${OSRM_BASE}/route/v1/driving/${fromLon},${fromLat};${toLon},${toLat}?overview=false`;
     const data = await gmFetch(url);
     if (data.code !== 'Ok' || !data.routes.length) return null;
-    return { distance: data.routes[0].distance, duration: data.routes[0].duration };
+    const distance = data.routes[0].distance;
+    const duration = distance / 1.4; // 1.4 m/s walking speed
+    return { distance, duration };
   }
 
   // --- Google Maps URLs ---
