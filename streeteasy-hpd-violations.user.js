@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         StreetEasy HPD Violations
 // @namespace    https://streeteasy.com/
-// @version      1.0.0
+// @version      1.0.1
 // @description  Shows HPD housing violations for the building at a StreetEasy listing
 // @match        https://streeteasy.com/building/*
 // @match        https://streeteasy.com/rental/*
@@ -11,6 +11,8 @@
 // @grant        GM_setValue
 // @connect      data.cityofnewyork.us
 // @run-at       document-idle
+// @updateURL    https://raw.githubusercontent.com/mgarbvs/StreetEasyScripts/main/streeteasy-hpd-violations.user.js
+// @downloadURL  https://raw.githubusercontent.com/mgarbvs/StreetEasyScripts/main/streeteasy-hpd-violations.user.js
 // ==/UserScript==
 
 (function () {
@@ -90,6 +92,7 @@
     return address
       .replace(/\s*#\S+/g, '')
       .replace(/\s*(apt|unit|suite|fl|floor)\.?\s*\S+/gi, '')
+      .replace(/['']/g, '')
       .trim();
   }
 

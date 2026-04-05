@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         StreetEasy DOB Permits & Complaints
 // @namespace    https://streeteasy.com/
-// @version      1.0.0
+// @version      1.0.1
 // @description  Shows DOB active permits and complaints for the building and nearby buildings at a StreetEasy listing
 // @match        https://streeteasy.com/building/*
 // @match        https://streeteasy.com/rental/*
@@ -12,6 +12,8 @@
 // @connect      data.cityofnewyork.us
 // @connect      nominatim.openstreetmap.org
 // @run-at       document-idle
+// @updateURL    https://raw.githubusercontent.com/mgarbvs/StreetEasyScripts/main/streeteasy-dob-permits.user.js
+// @downloadURL  https://raw.githubusercontent.com/mgarbvs/StreetEasyScripts/main/streeteasy-dob-permits.user.js
 // ==/UserScript==
 
 (function () {
@@ -127,7 +129,11 @@
   }
 
   function stripUnit(address) {
-    return address.replace(/\s*#\S+/g, '').replace(/\s*(apt|unit|suite|fl|floor)\.?\s*\S+/gi, '').trim();
+    return address
+      .replace(/\s*#\S+/g, '')
+      .replace(/\s*(apt|unit|suite|fl|floor)\.?\s*\S+/gi, '')
+      .replace(/['']/g, '')
+      .trim();
   }
 
   // Parse address into house number and street name for DOB queries

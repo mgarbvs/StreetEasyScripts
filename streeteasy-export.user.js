@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         StreetEasy Export to Sheets
 // @namespace    https://streeteasy.com/
-// @version      1.0.0
+// @version      1.0.1
 // @description  Save StreetEasy listing data (price, commute, 311, HPD, DOB) to Google Sheets for side-by-side comparison
 // @match        https://streeteasy.com/building/*
 // @match        https://streeteasy.com/rental/*
@@ -12,6 +12,8 @@
 // @connect      script.google.com
 // @connect      script.googleusercontent.com
 // @run-at       document-idle
+// @updateURL    https://raw.githubusercontent.com/mgarbvs/StreetEasyScripts/main/streeteasy-export.user.js
+// @downloadURL  https://raw.githubusercontent.com/mgarbvs/StreetEasyScripts/main/streeteasy-export.user.js
 // ==/UserScript==
 
 (function () {
@@ -27,7 +29,11 @@
   }
 
   function stripUnit(address) {
-    return address.replace(/\s*#\S+/g, '').replace(/\s*(apt|unit|suite|fl|floor)\.?\s*\S+/gi, '').trim();
+    return address
+      .replace(/\s*#\S+/g, '')
+      .replace(/\s*(apt|unit|suite|fl|floor)\.?\s*\S+/gi, '')
+      .replace(/['']/g, '')
+      .trim();
   }
 
   function commuteCacheKey(address) {

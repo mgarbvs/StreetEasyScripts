@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         StreetEasy 311 Complaint Lookup
 // @namespace    https://streeteasy.com/
-// @version      1.1.0
+// @version      1.1.1
 // @description  Shows recent 311 complaints at and near a StreetEasy listing address
 // @match        https://streeteasy.com/building/*
 // @match        https://streeteasy.com/rental/*
@@ -12,6 +12,8 @@
 // @connect      nominatim.openstreetmap.org
 // @connect      data.cityofnewyork.us
 // @run-at       document-idle
+// @updateURL    https://raw.githubusercontent.com/mgarbvs/StreetEasyScripts/main/streeteasy-311-lookup.user.js
+// @downloadURL  https://raw.githubusercontent.com/mgarbvs/StreetEasyScripts/main/streeteasy-311-lookup.user.js
 // ==/UserScript==
 
 (function () {
@@ -135,8 +137,11 @@
 
   // --- API calls ---
   function stripUnit(address) {
-    // Remove apartment/unit numbers: "#1C", "Apt 3B", "Unit 5", "Suite 200", etc.
-    return address.replace(/\s*#\S+/g, '').replace(/\s*(apt|unit|suite|fl|floor)\.?\s*\S+/gi, '').trim();
+    return address
+      .replace(/\s*#\S+/g, '')
+      .replace(/\s*(apt|unit|suite|fl|floor)\.?\s*\S+/gi, '')
+      .replace(/['']/g, '')
+      .trim();
   }
 
   // Shared geocode cache key (same as commute script — they share results)
