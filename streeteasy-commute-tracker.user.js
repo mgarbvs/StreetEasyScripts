@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         StreetEasy Commute Tracker
 // @namespace    https://streeteasy.com/
-// @version      2.1.1
+// @version      2.1.2
 // @description  Shows walking distance and Google Maps transit links to multiple destinations
 // @match        https://streeteasy.com/building/*
 // @match        https://streeteasy.com/rental/*
@@ -68,19 +68,29 @@
   }
 
   function gmFetch(url) {
+    const label = url.replace(/^https?:\/\//, '').slice(0, 60);
+    const t0 = performance.now();
+    console.debug(`[CommuteTracker] fetch start: ${label}`);
     return new Promise((resolve, reject) => {
       GM_xmlhttpRequest({
         method: 'GET',
         url,
         onload: (res) => {
+          const ms = Math.round(performance.now() - t0);
           if (res.status >= 200 && res.status < 300) {
+            console.debug(`[CommuteTracker] fetch done (${ms}ms): ${label}`);
             try { resolve(JSON.parse(res.responseText)); }
             catch (e) { reject(new Error('JSON parse error')); }
           } else {
+            console.warn(`[CommuteTracker] fetch failed HTTP ${res.status} (${ms}ms): ${label}`);
             reject(new Error(`HTTP ${res.status}`));
           }
         },
-        onerror: (err) => reject(err),
+        onerror: (err) => {
+          const ms = Math.round(performance.now() - t0);
+          console.warn(`[CommuteTracker] fetch error (${ms}ms): ${label}`, err);
+          reject(err);
+        },
       });
     });
   }
@@ -129,11 +139,16 @@
   async function geocode(address) {
     const key = geocodeCacheKey(address);
     const cached = getCached(key, GEOCODE_TTL_MS);
-    if (cached) return { lat: cached.lat, lon: cached.lon };
-
+    if (cached) {
+      console.debug(`[CommuteTracker] geocode cache HIT for "${address}"`);
+      return { lat: cached.lat, lon: cached.lon };
+    }
+    console.debug(`[CommuteTracker] geocode cache MISS for "${address}" — fetching Nominatim`);
+    const t0 = performance.now();
     const cleaned = stripUnit(address);
     const url = `${NOMINATIM_BASE}/search?format=json&q=${encodeURIComponent(cleaned)}&limit=1&countrycodes=us`;
     const results = await gmFetch(url);
+    console.debug(`[CommuteTracker] geocode total ${Math.round(performance.now() - t0)}ms`);
     if (!results || results.length === 0) return null;
     const coords = { lat: parseFloat(results[0].lat), lon: parseFloat(results[0].lon) };
     setCache(key, coords);
@@ -141,8 +156,10 @@
   }
 
   async function getWalkingRoute(fromLat, fromLon, toLat, toLon) {
+    const t0 = performance.now();
     const url = `${OSRM_BASE}/route/v1/driving/${fromLon},${fromLat};${toLon},${toLat}?overview=false`;
     const data = await gmFetch(url);
+    console.debug(`[CommuteTracker] OSRM total ${Math.round(performance.now() - t0)}ms`);
     if (data.code !== 'Ok' || !data.routes.length) return null;
     const distance = data.routes[0].distance;
     const duration = distance / 1.4; // 1.4 m/s walking speed
@@ -167,9 +184,14 @@
     const dest = OFFICES[destIndex];
     const cacheKey = destCacheKey(address, destIndex);
     const cached = getCached(cacheKey);
-    if (cached) return cached;
-
+    if (cached) {
+      console.debug(`[CommuteTracker] dest[${destIndex}] "${dest.label}" cache HIT`);
+      return cached;
+    }
+    console.debug(`[CommuteTracker] dest[${destIndex}] "${dest.label}" cache MISS — fetching route`);
+    const t0 = performance.now();
     const walking = await getWalkingRoute(coords.lat, coords.lon, dest.lat, dest.lon).catch(() => null);
+    console.debug(`[CommuteTracker] dest[${destIndex}] route fetch done in ${Math.round(performance.now() - t0)}ms`);
     const result = {
       walking,
       mapsLink: buildGoogleMapsLink(address, dest),
@@ -222,12 +244,17 @@
     const mapsLink = (!isLoading && data) ? (data.mapsLink || '#') : buildGoogleMapsLink(currentAddress || '', dest);
     const embedUrl = (!isLoading && data) ? (data.embedUrl || '') : '';
 
+    const iframeId = 'se-commute-iframe';
     const mapHtml = embedUrl ? `
-      <div id="se-commute-map-wrap" style="margin-top:10px;">
-        <button id="se-commute-show-map" style="
-          background:none;border:1px solid #E6E6E6;border-radius:4px;
-          cursor:pointer;font-size:13px;color:#62646A;padding:4px 10px;
-        ">Show map</button>
+      <div style="margin-top:12px;border-radius:6px;overflow:hidden;border:1px solid #E6E6E6;">
+        <iframe
+          id="${iframeId}"
+          src="${embedUrl}"
+          width="100%" height="350"
+          style="border:0;display:block;"
+          allowfullscreen=""
+          referrerpolicy="no-referrer-when-downgrade">
+        </iframe>
       </div>
     ` : '';
 
@@ -258,22 +285,13 @@
     card.querySelector('#se-commute-prev').addEventListener('click', () => navigate(-1));
     card.querySelector('#se-commute-next').addEventListener('click', () => navigate(1));
 
-    const showMapBtn = card.querySelector('#se-commute-show-map');
-    if (showMapBtn) {
-      showMapBtn.addEventListener('click', () => {
-        const wrap = card.querySelector('#se-commute-map-wrap');
-        wrap.innerHTML = `
-          <div style="border-radius:6px;overflow:hidden;border:1px solid #E6E6E6;margin-top:2px;">
-            <iframe
-              src="${embedUrl}"
-              width="100%" height="350"
-              style="border:0;display:block;"
-              allowfullscreen=""
-              referrerpolicy="no-referrer-when-downgrade">
-            </iframe>
-          </div>
-        `;
-      });
+    const iframe = card.querySelector(`#${iframeId}`);
+    if (iframe) {
+      const iframeT0 = performance.now();
+      console.debug(`[CommuteTracker] iframe src set: ${embedUrl.slice(0, 80)}`);
+      iframe.addEventListener('load', () => {
+        console.debug(`[CommuteTracker] iframe loaded in ${Math.round(performance.now() - iframeT0)}ms`);
+      }, { once: true });
     }
   }
 
@@ -358,6 +376,8 @@
       return;
     }
 
+    const t0 = performance.now();
+    console.debug(`[CommuteTracker] main() start — address: "${address}"`);
     currentAddress = address;
     currentDestIndex = 0;
 
@@ -387,6 +407,7 @@
       }
 
       const data = await fetchDestData(address, coords, 0);
+      console.debug(`[CommuteTracker] main() total JS time: ${Math.round(performance.now() - t0)}ms (iframe load is separate)`);
       // Restore card styles (may have been replaced by loading text)
       card.style.cssText = `
         font-family: "Source Sans Pro", "Helvetica Neue", Helvetica, Arial, sans-serif;
