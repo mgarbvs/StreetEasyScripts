@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         StreetEasy Commute Tracker
 // @namespace    https://streeteasy.com/
-// @version      2.0.2
+// @version      2.0.3
 // @description  Shows walking distance and Google Maps transit link to 12 W 39th St
 // @match        https://streeteasy.com/building/*
 // @match        https://streeteasy.com/rental/*
@@ -27,8 +27,8 @@
   const OSRM_BASE = 'https://router.project-osrm.org';
 
   // Fixed departure: 8:30 AM ET on Monday May 11, 2026
-  // May 11 2026 08:30:00 EDT (UTC-4) = 2026-05-11T12:30:00Z
-  const DEPARTURE_TS = Math.floor(new Date('2026-05-11T12:30:00Z').getTime() / 1000);
+  const DEPARTURE_DATE = '05/11/2026';
+  const DEPARTURE_TIME = '8:30am';
   const DEPARTURE_LABEL = 'Mon May 11, 8:30 AM';
 
   // --- Helpers ---
@@ -142,13 +142,13 @@
   function buildEmbedUrl(originAddr) {
     const origin = stripUnit(originAddr);
     const dest = OFFICE.label + ', New York, NY 10018';
-    return `https://www.google.com/maps?q=&saddr=${encodeURIComponent(origin)}&daddr=${encodeURIComponent(dest)}&dirflg=r&output=embed`;
+    return `https://maps.google.com/maps?q=&saddr=${encodeURIComponent(origin)}&daddr=${encodeURIComponent(dest)}&dirflg=r&ttype=dep&date=${DEPARTURE_DATE}&time=${DEPARTURE_TIME}&output=embed`;
   }
 
   function buildGoogleMapsLink(originAddr) {
     const origin = encodeURIComponent(stripUnit(originAddr));
     const dest = encodeURIComponent(OFFICE.label + ', New York, NY 10018');
-    return `https://www.google.com/maps/dir/?api=1&origin=${origin}&destination=${dest}&travelmode=transit&departure_time=${DEPARTURE_TS}`;
+    return `https://maps.google.com/maps?saddr=${origin}&daddr=${dest}&dirflg=r&ttype=dep&date=${DEPARTURE_DATE}&time=${DEPARTURE_TIME}`;
   }
 
   // --- UI ---
