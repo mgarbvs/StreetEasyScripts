@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         StreetEasy Commute Tracker
 // @namespace    https://streeteasy.com/
-// @version      2.1.2
+// @version      2.2.0
 // @description  Shows walking distance and Google Maps transit links to multiple destinations
 // @match        https://streeteasy.com/building/*
 // @match        https://streeteasy.com/rental/*
@@ -9,7 +9,7 @@
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
-// @connect      nominatim.openstreetmap.org
+// @connect      geosearch.planninglabs.nyc
 // @connect      router.project-osrm.org
 // @run-at       document-idle
 // @updateURL    https://raw.githubusercontent.com/mgarbvs/StreetEasyScripts/main/streeteasy-commute-tracker.user.js
@@ -27,8 +27,9 @@
   ];
   const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
   const GEOCODE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
-  const NOMINATIM_BASE = 'https://nominatim.openstreetmap.org';
+  const NYC_GEOCODER_BASE = 'https://geosearch.planninglabs.nyc';
   const OSRM_BASE = 'https://router.project-osrm.org';
+  const OSRM_TIMEOUT_MS = 10000;
 
   // Fixed departure: 8:30 AM ET on Monday May 11, 2026
   const DEPARTURE_DATE = '05/11/2026';
@@ -67,7 +68,7 @@
     return hashString(address + '|dest' + destIndex);
   }
 
-  function gmFetch(url) {
+  function gmFetch(url, timeoutMs) {
     const label = url.replace(/^https?:\/\//, '').slice(0, 60);
     const t0 = performance.now();
     console.debug(`[CommuteTracker] fetch start: ${label}`);
@@ -75,6 +76,7 @@
       GM_xmlhttpRequest({
         method: 'GET',
         url,
+        timeout: timeoutMs || 30000,
         onload: (res) => {
           const ms = Math.round(performance.now() - t0);
           if (res.status >= 200 && res.status < 300) {
@@ -86,6 +88,11 @@
             reject(new Error(`HTTP ${res.status}`));
           }
         },
+        ontimeout: () => {
+          const ms = Math.round(performance.now() - t0);
+          console.warn(`[CommuteTracker] fetch timeout (${ms}ms): ${label}`);
+          reject(new Error('timeout'));
+        },
         onerror: (err) => {
           const ms = Math.round(performance.now() - t0);
           console.warn(`[CommuteTracker] fetch error (${ms}ms): ${label}`, err);
@@ -93,6 +100,15 @@
         },
       });
     });
+  }
+
+  function haversineDistance(lat1, lon1, lat2, lon2) {
+    const R = 6371000;
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLon = (lon2 - lon1) * Math.PI / 180;
+    const a = Math.sin(dLat / 2) ** 2 +
+      Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   }
 
   function formatDistance(meters) {
@@ -143,14 +159,15 @@
       console.debug(`[CommuteTracker] geocode cache HIT for "${address}"`);
       return { lat: cached.lat, lon: cached.lon };
     }
-    console.debug(`[CommuteTracker] geocode cache MISS for "${address}" — fetching Nominatim`);
+    console.debug(`[CommuteTracker] geocode cache MISS for "${address}" — fetching NYC geocoder`);
     const t0 = performance.now();
     const cleaned = stripUnit(address);
-    const url = `${NOMINATIM_BASE}/search?format=json&q=${encodeURIComponent(cleaned)}&limit=1&countrycodes=us`;
-    const results = await gmFetch(url);
+    const url = `${NYC_GEOCODER_BASE}/v2/search?text=${encodeURIComponent(cleaned)}&size=1`;
+    const result = await gmFetch(url);
     console.debug(`[CommuteTracker] geocode total ${Math.round(performance.now() - t0)}ms`);
-    if (!results || results.length === 0) return null;
-    const coords = { lat: parseFloat(results[0].lat), lon: parseFloat(results[0].lon) };
+    if (!result || !result.features || result.features.length === 0) return null;
+    const [lon, lat] = result.features[0].geometry.coordinates;
+    const coords = { lat, lon };
     setCache(key, coords);
     return coords;
   }
@@ -158,12 +175,21 @@
   async function getWalkingRoute(fromLat, fromLon, toLat, toLon) {
     const t0 = performance.now();
     const url = `${OSRM_BASE}/route/v1/driving/${fromLon},${fromLat};${toLon},${toLat}?overview=false`;
-    const data = await gmFetch(url);
-    console.debug(`[CommuteTracker] OSRM total ${Math.round(performance.now() - t0)}ms`);
-    if (data.code !== 'Ok' || !data.routes.length) return null;
-    const distance = data.routes[0].distance;
-    const duration = distance / 1.4; // 1.4 m/s walking speed
-    return { distance, duration };
+    try {
+      const data = await gmFetch(url, OSRM_TIMEOUT_MS);
+      console.debug(`[CommuteTracker] OSRM total ${Math.round(performance.now() - t0)}ms`);
+      if (data.code !== 'Ok' || !data.routes.length) throw new Error('no route');
+      const distance = data.routes[0].distance;
+      const duration = distance / 1.4; // 1.4 m/s walking speed
+      return { distance, duration, estimated: false };
+    } catch (err) {
+      const ms = Math.round(performance.now() - t0);
+      console.warn(`[CommuteTracker] OSRM failed (${ms}ms): ${err.message} — using haversine estimate`);
+      // Manhattan street grid ~30% longer than straight line
+      const distance = haversineDistance(fromLat, fromLon, toLat, toLon) * 1.3;
+      const duration = distance / 1.4;
+      return { distance, duration, estimated: true };
+    }
   }
 
   // --- Google Maps URLs ---
@@ -223,8 +249,9 @@
             <span style="color:#333;font-weight:600;font-size:14px;">Walking</span>
           </div>
           <div style="text-align:right;">
-            <span style="color:#333;font-weight:700;font-size:16px;">${formatDuration(data.walking.duration)}</span>
-            <span style="color:#62646A;font-size:13px;margin-left:6px;">${formatDistance(data.walking.distance)}</span>
+            <span style="color:#333;font-weight:700;font-size:16px;">${data.walking.estimated ? '~' : ''}${formatDuration(data.walking.duration)}</span>
+            <span style="color:#62646A;font-size:13px;margin-left:6px;">${data.walking.estimated ? '~' : ''}${formatDistance(data.walking.distance)}</span>
+            ${data.walking.estimated ? '<span style="color:#999;font-size:11px;margin-left:4px;">(est)</span>' : ''}
           </div>
         </div>
       `;
@@ -376,6 +403,11 @@
       return;
     }
 
+    if (isRunning) {
+      console.debug(`[CommuteTracker] main() skipped — already running`);
+      return;
+    }
+    isRunning = true;
     const t0 = performance.now();
     console.debug(`[CommuteTracker] main() start — address: "${address}"`);
     currentAddress = address;
@@ -403,6 +435,7 @@
           mapsLink: buildGoogleMapsLink(address, dest),
           embedUrl: buildEmbedUrl(address, dest),
         }, 0, false);
+        isRunning = false;
         return;
       }
 
@@ -419,6 +452,7 @@
         box-shadow: 0 1px 3px rgba(0,0,0,0.06);
       `;
       renderCardContents(card, data, 0, false);
+      isRunning = false;
     } catch (err) {
       console.error('[CommuteTracker]', err);
       const dest = OFFICES[0];
@@ -427,11 +461,13 @@
         mapsLink: buildGoogleMapsLink(address, dest),
         embedUrl: buildEmbedUrl(address, dest),
       }, 0, false);
+      isRunning = false;
     }
   }
 
   // --- Startup: wait for title, re-inject on React re-renders ---
   let hasRun = false;
+  let isRunning = false;
   let lastCard = null;
 
   function waitForTitle(callback) {
@@ -448,7 +484,7 @@
 
   function watchForRemoval() {
     const bodyObserver = new MutationObserver(() => {
-      if (lastCard && !document.contains(lastCard) && !document.getElementById('se-commute-tracker')) {
+      if (lastCard && !document.contains(lastCard) && !document.getElementById('se-commute-tracker') && !isRunning) {
         hasRun = false;
         main();
       }
