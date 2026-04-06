@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         StreetEasy Commute Tracker
 // @namespace    https://streeteasy.com/
-// @version      2.2.0
+// @version      2.3.0
 // @description  Shows walking distance and Google Maps transit links to multiple destinations
 // @match        https://streeteasy.com/building/*
 // @match        https://streeteasy.com/rental/*
@@ -10,7 +10,6 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @connect      geosearch.planninglabs.nyc
-// @connect      router.project-osrm.org
 // @run-at       document-idle
 // @updateURL    https://raw.githubusercontent.com/mgarbvs/StreetEasyScripts/main/streeteasy-commute-tracker.user.js
 // @downloadURL  https://raw.githubusercontent.com/mgarbvs/StreetEasyScripts/main/streeteasy-commute-tracker.user.js
@@ -28,8 +27,6 @@
   const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
   const GEOCODE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
   const NYC_GEOCODER_BASE = 'https://geosearch.planninglabs.nyc';
-  const OSRM_BASE = 'https://router.project-osrm.org';
-  const OSRM_TIMEOUT_MS = 10000;
 
   // Fixed departure: 8:30 AM ET on Monday May 11, 2026
   const DEPARTURE_DATE = '05/11/2026';
@@ -172,24 +169,11 @@
     return coords;
   }
 
-  async function getWalkingRoute(fromLat, fromLon, toLat, toLon) {
-    const t0 = performance.now();
-    const url = `${OSRM_BASE}/route/v1/driving/${fromLon},${fromLat};${toLon},${toLat}?overview=false`;
-    try {
-      const data = await gmFetch(url, OSRM_TIMEOUT_MS);
-      console.debug(`[CommuteTracker] OSRM total ${Math.round(performance.now() - t0)}ms`);
-      if (data.code !== 'Ok' || !data.routes.length) throw new Error('no route');
-      const distance = data.routes[0].distance;
-      const duration = distance / 1.4; // 1.4 m/s walking speed
-      return { distance, duration, estimated: false };
-    } catch (err) {
-      const ms = Math.round(performance.now() - t0);
-      console.warn(`[CommuteTracker] OSRM failed (${ms}ms): ${err.message} — using haversine estimate`);
-      // Manhattan street grid ~30% longer than straight line
-      const distance = haversineDistance(fromLat, fromLon, toLat, toLon) * 1.3;
-      const duration = distance / 1.4;
-      return { distance, duration, estimated: true };
-    }
+  function getWalkingRoute(fromLat, fromLon, toLat, toLon) {
+    // Manhattan street grid ~30% longer than straight-line distance
+    const distance = haversineDistance(fromLat, fromLon, toLat, toLon) * 1.3;
+    const duration = distance / 1.4; // 1.4 m/s walking speed
+    return { distance, duration, estimated: true };
   }
 
   // --- Google Maps URLs ---
@@ -214,10 +198,8 @@
       console.debug(`[CommuteTracker] dest[${destIndex}] "${dest.label}" cache HIT`);
       return cached;
     }
-    console.debug(`[CommuteTracker] dest[${destIndex}] "${dest.label}" cache MISS — fetching route`);
-    const t0 = performance.now();
-    const walking = await getWalkingRoute(coords.lat, coords.lon, dest.lat, dest.lon).catch(() => null);
-    console.debug(`[CommuteTracker] dest[${destIndex}] route fetch done in ${Math.round(performance.now() - t0)}ms`);
+    console.debug(`[CommuteTracker] dest[${destIndex}] "${dest.label}" cache MISS — computing haversine`);
+    const walking = getWalkingRoute(coords.lat, coords.lon, dest.lat, dest.lon);
     const result = {
       walking,
       mapsLink: buildGoogleMapsLink(address, dest),
@@ -440,7 +422,7 @@
       }
 
       const data = await fetchDestData(address, coords, 0);
-      console.debug(`[CommuteTracker] main() total JS time: ${Math.round(performance.now() - t0)}ms (iframe load is separate)`);
+      console.debug(`[CommuteTracker] main() total time: ${Math.round(performance.now() - t0)}ms`);
       // Restore card styles (may have been replaced by loading text)
       card.style.cssText = `
         font-family: "Source Sans Pro", "Helvetica Neue", Helvetica, Arial, sans-serif;
