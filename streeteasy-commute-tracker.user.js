@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         StreetEasy Commute Tracker
 // @namespace    https://streeteasy.com/
-// @version      2.0.3
-// @description  Shows walking distance and Google Maps transit link to 12 W 39th St
+// @version      2.1.0
+// @description  Shows walking distance and Google Maps transit links to multiple destinations
 // @match        https://streeteasy.com/building/*
 // @match        https://streeteasy.com/rental/*
 // @match        https://streeteasy.com/sale/*
@@ -20,7 +20,11 @@
   'use strict';
 
   // --- Configuration ---
-  const OFFICE = { lat: 40.75337, lon: -73.98494, label: '12 W 39th St' };
+  const OFFICES = [
+    { lat: 40.75337, lon: -73.98494, label: '12 W 39th St' },
+    { lat: 40.75816, lon: -73.98554, label: 'Times Square' },
+    { lat: 40.74844, lon: -73.98566, label: 'Penn Station' },
+  ];
   const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
   const GEOCODE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
   const NOMINATIM_BASE = 'https://nominatim.openstreetmap.org';
@@ -30,6 +34,11 @@
   const DEPARTURE_DATE = '05/11/2026';
   const DEPARTURE_TIME = '8:30am';
   const DEPARTURE_LABEL = 'Mon May 11, 8:30 AM';
+
+  // --- Carousel state ---
+  let currentDestIndex = 0;
+  let currentAddress = null;
+  let currentCoords = null;
 
   // --- Helpers ---
   function hashString(str) {
@@ -52,6 +61,10 @@
 
   function setCache(key, payload) {
     GM_setValue(key, JSON.stringify({ ...payload, ts: Date.now() }));
+  }
+
+  function destCacheKey(address, destIndex) {
+    return hashString(address + '|dest' + destIndex);
   }
 
   function gmFetch(url) {
@@ -128,8 +141,6 @@
   }
 
   async function getWalkingRoute(fromLat, fromLon, toLat, toLon) {
-    // Use driving profile for road distance (foot profile on public OSRM returns car times anyway).
-    // We override duration ourselves at 1.4 m/s (~3.1 mph), matching OSRM's pedestrian model.
     const url = `${OSRM_BASE}/route/v1/driving/${fromLon},${fromLat};${toLon},${toLat}?overview=false`;
     const data = await gmFetch(url);
     if (data.code !== 'Ok' || !data.routes.length) return null;
@@ -139,34 +150,50 @@
   }
 
   // --- Google Maps URLs ---
-  function buildEmbedUrl(originAddr) {
+  function buildEmbedUrl(originAddr, dest) {
     const origin = stripUnit(originAddr);
-    const dest = OFFICE.label + ', New York, NY 10018';
-    return `https://maps.google.com/maps?q=&saddr=${encodeURIComponent(origin)}&daddr=${encodeURIComponent(dest)}&dirflg=r&ttype=dep&date=${DEPARTURE_DATE}&time=${DEPARTURE_TIME}&output=embed`;
+    const destStr = dest.label + ', New York, NY';
+    return `https://maps.google.com/maps?q=&saddr=${encodeURIComponent(origin)}&daddr=${encodeURIComponent(destStr)}&dirflg=r&ttype=dep&date=${DEPARTURE_DATE}&time=${DEPARTURE_TIME}&output=embed`;
   }
 
-  function buildGoogleMapsLink(originAddr) {
+  function buildGoogleMapsLink(originAddr, dest) {
     const origin = encodeURIComponent(stripUnit(originAddr));
-    const dest = encodeURIComponent(OFFICE.label + ', New York, NY 10018');
-    return `https://maps.google.com/maps?saddr=${origin}&daddr=${dest}&dirflg=r&ttype=dep&date=${DEPARTURE_DATE}&time=${DEPARTURE_TIME}`;
+    const destStr = encodeURIComponent(dest.label + ', New York, NY');
+    return `https://maps.google.com/maps?saddr=${origin}&daddr=${destStr}&dirflg=r&ttype=dep&date=${DEPARTURE_DATE}&time=${DEPARTURE_TIME}`;
+  }
+
+  // --- Fetch commute data for a specific destination ---
+  async function fetchDestData(address, coords, destIndex) {
+    const dest = OFFICES[destIndex];
+    const cacheKey = destCacheKey(address, destIndex);
+    const cached = getCached(cacheKey);
+    if (cached) return cached;
+
+    const walking = await getWalkingRoute(coords.lat, coords.lon, dest.lat, dest.lon).catch(() => null);
+    const result = {
+      walking,
+      mapsLink: buildGoogleMapsLink(address, dest),
+      embedUrl: buildEmbedUrl(address, dest),
+      address,
+      destIndex,
+    };
+    setCache(cacheKey, result);
+    return result;
   }
 
   // --- UI ---
-  function createCommuteCard(data) {
-    const card = document.createElement('div');
-    card.id = 'se-commute-tracker';
-    card.style.cssText = `
-      font-family: "Source Sans Pro", "Helvetica Neue", Helvetica, Arial, sans-serif;
-      border: 1px solid #E6E6E6;
-      border-radius: 8px;
-      padding: 16px 20px;
-      margin: 16px 0;
-      background: #FFFFFF;
-      box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+  function renderCardContents(card, data, destIndex, isLoading) {
+    const dest = OFFICES[destIndex];
+    const total = OFFICES.length;
+
+    const navBtnStyle = `
+      background: none; border: 1px solid #E6E6E6; border-radius: 4px;
+      cursor: pointer; font-size: 14px; color: #62646A; padding: 2px 8px;
+      line-height: 1.4; transition: background 0.1s;
     `;
 
     let walkingHtml = '';
-    if (data.walking) {
+    if (!isLoading && data && data.walking) {
       walkingHtml = `
         <div style="display:flex;align-items:center;gap:8px;padding:10px 0;border-bottom:1px solid #F0F0F0;">
           <span style="font-size:20px;width:28px;text-align:center;">🚶</span>
@@ -179,18 +206,22 @@
           </div>
         </div>
       `;
+    } else if (isLoading) {
+      walkingHtml = `
+        <div style="padding:10px 0;border-bottom:1px solid #F0F0F0;color:#62646A;font-size:14px;">
+          Loading…
+        </div>
+      `;
     }
 
     let errorHtml = '';
-    if (data.error) {
+    if (!isLoading && data && data.error) {
       errorHtml = `<div style="color:#c0392b;font-size:13px;margin-top:8px;">${data.error}</div>`;
     }
 
-    const cacheAge = data.ts ? Math.round((Date.now() - data.ts) / 60000) : 0;
-    const cacheLabel = cacheAge < 1 ? 'just now' : cacheAge < 60 ? `${cacheAge} min ago` : `${Math.round(cacheAge / 60)} hr ago`;
+    const mapsLink = (!isLoading && data) ? (data.mapsLink || '#') : buildGoogleMapsLink(currentAddress || '', dest);
+    const embedUrl = (!isLoading && data) ? (data.embedUrl || '') : '';
 
-    const embedUrl = data.embedUrl || '';
-    const mapsLink = data.mapsLink || '#';
     const mapHtml = embedUrl ? `
       <div style="margin-top:12px;border-radius:6px;overflow:hidden;border:1px solid #E6E6E6;">
         <iframe
@@ -204,23 +235,69 @@
       </div>
     ` : '';
 
+    const cacheAge = (data && data.ts) ? Math.round((Date.now() - data.ts) / 60000) : 0;
+    const cacheLabel = isLoading ? '' : (cacheAge < 1 ? 'just now' : cacheAge < 60 ? `${cacheAge} min ago` : `${Math.round(cacheAge / 60)} hr ago`);
+
     card.innerHTML = `
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
-        <div style="font-size:16px;font-weight:700;color:#333;">Commute to ${OFFICE.label}</div>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;gap:8px;">
+        <div style="display:flex;align-items:center;gap:6px;min-width:0;">
+          <button id="se-commute-prev" style="${navBtnStyle}" title="Previous destination">‹</button>
+          <div style="font-size:15px;font-weight:700;color:#333;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
+            Commute to ${dest.label}
+          </div>
+          <span style="font-size:12px;color:#999;white-space:nowrap;">(${destIndex + 1}/${total})</span>
+          <button id="se-commute-next" style="${navBtnStyle}" title="Next destination">›</button>
+        </div>
         <a href="${mapsLink}" target="_blank" rel="noopener"
-           style="font-size:13px;color:#0041D9;text-decoration:none;font-weight:600;">
-          Transit directions (${DEPARTURE_LABEL}) →
+           style="font-size:13px;color:#0041D9;text-decoration:none;font-weight:600;white-space:nowrap;flex-shrink:0;">
+          Transit (${DEPARTURE_LABEL}) →
         </a>
       </div>
       ${walkingHtml}
       ${mapHtml}
       ${errorHtml}
-      <div style="margin-top:10px;font-size:11px;color:#999;">
-        Cached · fetched ${cacheLabel}
-      </div>
+      ${!isLoading ? `<div style="margin-top:10px;font-size:11px;color:#999;">Cached · fetched ${cacheLabel}</div>` : ''}
     `;
 
+    card.querySelector('#se-commute-prev').addEventListener('click', () => navigate(-1));
+    card.querySelector('#se-commute-next').addEventListener('click', () => navigate(1));
+  }
+
+  function getOrCreateCard() {
+    let card = document.getElementById('se-commute-tracker');
+    if (!card) {
+      card = document.createElement('div');
+      card.id = 'se-commute-tracker';
+      card.style.cssText = `
+        font-family: "Source Sans Pro", "Helvetica Neue", Helvetica, Arial, sans-serif;
+        border: 1px solid #E6E6E6;
+        border-radius: 8px;
+        padding: 16px 20px;
+        margin: 16px 0;
+        background: #FFFFFF;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+      `;
+      injectCard(card);
+    }
     return card;
+  }
+
+  async function navigate(delta) {
+    currentDestIndex = (currentDestIndex + delta + OFFICES.length) % OFFICES.length;
+    const card = getOrCreateCard();
+
+    // Show loading state immediately
+    renderCardContents(card, null, currentDestIndex, true);
+
+    if (!currentAddress || !currentCoords) return;
+
+    try {
+      const data = await fetchDestData(currentAddress, currentCoords, currentDestIndex);
+      renderCardContents(card, data, currentDestIndex, false);
+    } catch (err) {
+      console.error('[CommuteTracker]', err);
+      renderCardContents(card, { error: 'Failed to load commute data.', mapsLink: buildGoogleMapsLink(currentAddress, OFFICES[currentDestIndex]) }, currentDestIndex, false);
+    }
   }
 
   function findInjectionPoint() {
@@ -267,54 +344,54 @@
       return;
     }
 
-    const cacheKey = hashString(address);
-    const cached = getCached(cacheKey);
-    if (cached) {
-      injectCard(createCommuteCard(cached));
-      return;
-    }
+    currentAddress = address;
+    currentDestIndex = 0;
 
-    const loadingCard = document.createElement('div');
-    loadingCard.id = 'se-commute-tracker';
-    loadingCard.style.cssText = `
+    // Show loading card
+    const card = document.createElement('div');
+    card.id = 'se-commute-tracker';
+    card.style.cssText = `
       font-family: "Source Sans Pro", "Helvetica Neue", Helvetica, Arial, sans-serif;
       border: 1px solid #E6E6E6; border-radius: 8px; padding: 16px 20px; margin: 16px 0;
       background: #FFFFFF; color: #62646A; font-size: 14px;
     `;
-    loadingCard.textContent = 'Loading commute info…';
-    injectCard(loadingCard);
+    card.textContent = 'Loading commute info…';
+    injectCard(card);
 
     try {
       const coords = await geocode(address);
+      currentCoords = coords;
+
       if (!coords) {
-        const errorData = {
+        const dest = OFFICES[0];
+        renderCardContents(card, {
           error: `Could not geocode "${address}". Check that the address is valid.`,
-          mapsLink: buildGoogleMapsLink(address),
-          embedUrl: buildEmbedUrl(address),
-        };
-        injectCard(createCommuteCard(errorData));
+          mapsLink: buildGoogleMapsLink(address, dest),
+          embedUrl: buildEmbedUrl(address, dest),
+        }, 0, false);
         return;
       }
 
-      const walking = await getWalkingRoute(coords.lat, coords.lon, OFFICE.lat, OFFICE.lon).catch(() => null);
-
-      const result = {
-        walking,
-        mapsLink: buildGoogleMapsLink(address),
-        embedUrl: buildEmbedUrl(address),
-        address,
-      };
-
-      setCache(cacheKey, result);
-      injectCard(createCommuteCard(result));
+      const data = await fetchDestData(address, coords, 0);
+      // Restore card styles (may have been replaced by loading text)
+      card.style.cssText = `
+        font-family: "Source Sans Pro", "Helvetica Neue", Helvetica, Arial, sans-serif;
+        border: 1px solid #E6E6E6;
+        border-radius: 8px;
+        padding: 16px 20px;
+        margin: 16px 0;
+        background: #FFFFFF;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+      `;
+      renderCardContents(card, data, 0, false);
     } catch (err) {
       console.error('[CommuteTracker]', err);
-      const errorData = {
+      const dest = OFFICES[0];
+      renderCardContents(card, {
         error: 'Failed to load commute data. Try refreshing.',
-        mapsLink: buildGoogleMapsLink(address),
-        embedUrl: buildEmbedUrl(address),
-      };
-      injectCard(createCommuteCard(errorData));
+        mapsLink: buildGoogleMapsLink(address, dest),
+        embedUrl: buildEmbedUrl(address, dest),
+      }, 0, false);
     }
   }
 
