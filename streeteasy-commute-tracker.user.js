@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         StreetEasy Commute Tracker
 // @namespace    https://streeteasy.com/
-// @version      2.1.0
+// @version      2.1.1
 // @description  Shows walking distance and Google Maps transit links to multiple destinations
 // @match        https://streeteasy.com/building/*
 // @match        https://streeteasy.com/rental/*
@@ -223,15 +223,11 @@
     const embedUrl = (!isLoading && data) ? (data.embedUrl || '') : '';
 
     const mapHtml = embedUrl ? `
-      <div style="margin-top:12px;border-radius:6px;overflow:hidden;border:1px solid #E6E6E6;">
-        <iframe
-          src="${embedUrl}"
-          width="100%" height="350"
-          style="border:0;display:block;"
-          allowfullscreen=""
-          loading="lazy"
-          referrerpolicy="no-referrer-when-downgrade">
-        </iframe>
+      <div id="se-commute-map-wrap" style="margin-top:10px;">
+        <button id="se-commute-show-map" style="
+          background:none;border:1px solid #E6E6E6;border-radius:4px;
+          cursor:pointer;font-size:13px;color:#62646A;padding:4px 10px;
+        ">Show map</button>
       </div>
     ` : '';
 
@@ -261,6 +257,24 @@
 
     card.querySelector('#se-commute-prev').addEventListener('click', () => navigate(-1));
     card.querySelector('#se-commute-next').addEventListener('click', () => navigate(1));
+
+    const showMapBtn = card.querySelector('#se-commute-show-map');
+    if (showMapBtn) {
+      showMapBtn.addEventListener('click', () => {
+        const wrap = card.querySelector('#se-commute-map-wrap');
+        wrap.innerHTML = `
+          <div style="border-radius:6px;overflow:hidden;border:1px solid #E6E6E6;margin-top:2px;">
+            <iframe
+              src="${embedUrl}"
+              width="100%" height="350"
+              style="border:0;display:block;"
+              allowfullscreen=""
+              referrerpolicy="no-referrer-when-downgrade">
+            </iframe>
+          </div>
+        `;
+      });
+    }
   }
 
   function getOrCreateCard() {
