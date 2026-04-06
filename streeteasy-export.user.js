@@ -1,16 +1,15 @@
 // ==UserScript==
-// @name         StreetEasy Export to Sheets
+// @name         StreetEasy Export to Notion
 // @namespace    https://streeteasy.com/
-// @version      1.0.1
-// @description  Save StreetEasy listing data (price, commute, 311, HPD, DOB) to Google Sheets for side-by-side comparison
+// @version      2.0.0
+// @description  Save StreetEasy listing data (price, commute, 311, HPD, DOB) to a Notion database
 // @match        https://streeteasy.com/building/*
 // @match        https://streeteasy.com/rental/*
 // @match        https://streeteasy.com/sale/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
-// @connect      script.google.com
-// @connect      script.googleusercontent.com
+// @connect      api.notion.com
 // @run-at       document-idle
 // @updateURL    https://raw.githubusercontent.com/mgarbvs/StreetEasyScripts/main/streeteasy-export.user.js
 // @downloadURL  https://raw.githubusercontent.com/mgarbvs/StreetEasyScripts/main/streeteasy-export.user.js
@@ -170,21 +169,15 @@
   // --- Commute data from cache ---
   function getCommuteData(address) {
     const cached = getCached(commuteCacheKey(address));
-    if (!cached) return { walkingTime: '', transitTime: '', transitRoute: '' };
+    if (!cached) return { walkingTimeMin: null, mapsLink: '' };
 
-    let walkingTime = '';
-    if (cached.walking && cached.walking.duration) {
-      walkingTime = Math.round(cached.walking.duration / 60) + ' min';
-    }
+    const walkingTimeMin = (cached.walking && cached.walking.duration)
+      ? Math.round(cached.walking.duration / 60)
+      : null;
 
-    let transitTime = '';
-    let transitRoute = '';
-    if (cached.transit && cached.transit.best) {
-      transitTime = Math.round(cached.transit.best.duration / 60) + ' min';
-      transitRoute = cached.transit.best.modeLabel || '';
-    }
+    const mapsLink = cached.mapsLink || '';
 
-    return { walkingTime, transitTime, transitRoute };
+    return { walkingTimeMin, mapsLink };
   }
 
   // --- 311 data from cache ---
@@ -237,84 +230,98 @@
     const hpd = getHpdData(address);
     const dob = getDobData(address);
 
+    const priceRaw = getPrice().replace(/[$,]/g, '');
+    const buildingName = getBuildingName();
+    const addrLabel = address.replace(/, New York, NY$/, '');
+
     return {
-      address: address.replace(/, New York, NY$/, ''),
+      address: buildingName ? `${buildingName} — ${addrLabel}` : addrLabel,
       neighborhood: getNeighborhood(),
-      price: getPrice(),
-      beds: getBeds(),
-      baths: getBaths(),
-      rooms: getRooms(),
-      sqft: getSqft(),
-      buildingName: getBuildingName(),
+      price: priceRaw ? parseFloat(priceRaw) : null,
+      beds: getBeds() ? parseFloat(getBeds()) : null,
+      baths: getBaths() ? parseFloat(getBaths()) : null,
+      sqft: getSqft() ? parseFloat(getSqft()) : null,
       listingUrl: window.location.href,
-      walkingTime: commute.walkingTime,
-      transitTime: commute.transitTime,
-      transitRoute: commute.transitRoute,
-      complaints311Total: complaints.total,
-      complaints311Building: complaints.building,
-      complaints311Safety: complaints.safety,
-      hpdViolationsTotal: hpd.total,
-      hpdViolationsOpen: hpd.open,
-      hpdClassC: hpd.classC,
-      dobActivePermits: dob.activePermits,
-      notes: '',
+      walkingTimeMin: commute.walkingTimeMin,
+      mapsLink: commute.mapsLink,
+      complaints311: complaints.total !== '' ? complaints.total : null,
+      hpdViolations: hpd.total !== '' ? hpd.total : null,
+      dobFlags: dob.activePermits !== '' ? String(dob.activePermits) : '',
     };
   }
 
-  // --- Google Apps Script POST ---
-  function postToSheet(data) {
+  // --- Notion API POST ---
+  // Database ID for the Apartments database in Notion
+  const NOTION_DB_ID = '56e5446adb514b82b622ef75af05f392';
+  const NOTION_VERSION = '2022-06-28';
+
+  function buildNotionPayload(data) {
+    var props = {
+      'Address': { title: [{ text: { content: data.address || '' } }] },
+      'Status': { select: { name: 'Interested' } },
+      'Neighborhood': { rich_text: [{ text: { content: data.neighborhood || '' } }] },
+      'StreetEasy URL': { url: data.listingUrl || null },
+    };
+
+    if (data.price != null)         props['Price']            = { number: data.price };
+    if (data.beds != null)          props['Beds']             = { number: data.beds };
+    if (data.baths != null)         props['Baths']            = { number: data.baths };
+    if (data.sqft != null)          props['Sqft']             = { number: data.sqft };
+    if (data.walkingTimeMin != null) props['Walk Time (min)'] = { number: data.walkingTimeMin };
+    if (data.mapsLink)              props['Transit Link']     = { url: data.mapsLink };
+    if (data.complaints311 != null) props['311 Complaints']   = { number: data.complaints311 };
+    if (data.hpdViolations != null) props['HPD Violations']   = { number: data.hpdViolations };
+    if (data.dobFlags)              props['DOB Flags']        = { rich_text: [{ text: { content: data.dobFlags } }] };
+
+    return { parent: { database_id: NOTION_DB_ID }, properties: props };
+  }
+
+  function postToNotion(data) {
     return new Promise(function (resolve, reject) {
-      var webhookUrl = GM_getValue('sheets_webhook_url', '');
-      if (!webhookUrl) {
-        reject(new Error('No Google Apps Script URL configured'));
+      var token = GM_getValue('notion_token', '');
+      if (!token) {
+        reject(new Error('No Notion token configured — click ⚙ to add it'));
         return;
       }
 
       GM_xmlhttpRequest({
         method: 'POST',
-        url: webhookUrl,
-        headers: { 'Content-Type': 'application/json' },
-        data: JSON.stringify(data),
+        url: 'https://api.notion.com/v1/pages',
+        headers: {
+          'Authorization': 'Bearer ' + token,
+          'Content-Type': 'application/json',
+          'Notion-Version': NOTION_VERSION,
+        },
+        data: JSON.stringify(buildNotionPayload(data)),
         onload: function (res) {
-          if (res.status >= 200 && res.status < 400) {
-            try {
-              var json = JSON.parse(res.responseText);
-              if (json.status === 'ok') {
-                resolve(json);
-              } else {
-                reject(new Error(json.message || 'Unknown error from Apps Script'));
-              }
-            } catch (e) {
-              // Google Apps Script redirects on POST; a 200 with HTML is still success
-              if (res.responseText.length < 2000) {
-                resolve({ status: 'ok' });
-              } else {
-                reject(new Error('Unexpected response from Apps Script'));
-              }
-            }
+          if (res.status === 200) {
+            resolve(JSON.parse(res.responseText));
           } else {
-            reject(new Error('HTTP ' + res.status));
+            try {
+              var err = JSON.parse(res.responseText);
+              reject(new Error(err.message || 'Notion API error ' + res.status));
+            } catch (e) {
+              reject(new Error('HTTP ' + res.status));
+            }
           }
         },
-        onerror: function (err) {
-          reject(new Error('Network error'));
-        },
+        onerror: function () { reject(new Error('Network error')); },
       });
     });
   }
 
-  // --- URL configuration ---
-  function promptForWebhookUrl() {
-    var current = GM_getValue('sheets_webhook_url', '');
+  // --- Token configuration ---
+  function promptForToken() {
+    var current = GM_getValue('notion_token', '');
     var msg = current
-      ? 'Update your Google Apps Script web app URL:\n\n(Current: ' + current.substring(0, 60) + '...)'
-      : 'Enter your Google Apps Script web app URL:\n\n(Deploy the companion google-apps-script.js as a web app and paste the URL here)';
-    var url = prompt(msg, current);
-    if (url && url.trim().startsWith('https://script.google.com/')) {
-      GM_setValue('sheets_webhook_url', url.trim());
+      ? 'Update your Notion integration token:\n\n(notion.com/my-integrations → your integration → "Internal Integration Secret")'
+      : 'Enter your Notion integration token:\n\n1. Go to notion.com/my-integrations\n2. Create an integration (or use existing)\n3. Copy the "Internal Integration Secret" (starts with secret_)\n4. Make sure the Apartments database is shared with the integration';
+    var token = prompt(msg, current);
+    if (token && token.trim().startsWith('secret_')) {
+      GM_setValue('notion_token', token.trim());
       return true;
-    } else if (url !== null) {
-      alert('Invalid URL. Must start with https://script.google.com/');
+    } else if (token !== null) {
+      alert('Invalid token. Must start with secret_');
       return false;
     }
     return false;
@@ -339,7 +346,7 @@
     // Settings gear (small, above the main button)
     var gear = document.createElement('button');
     gear.textContent = '\u2699';
-    gear.title = 'Configure Google Sheets URL';
+    gear.title = 'Configure Notion token';
     gear.style.cssText = [
       'width: 28px',
       'height: 28px',
@@ -354,7 +361,7 @@
       'padding: 0',
     ].join(';');
     gear.addEventListener('click', function () {
-      promptForWebhookUrl();
+      promptForToken();
     });
 
     // Main save button
@@ -408,10 +415,10 @@
   }
 
   async function handleSave() {
-    // Check for webhook URL first
-    var webhookUrl = GM_getValue('sheets_webhook_url', '');
-    if (!webhookUrl) {
-      var configured = promptForWebhookUrl();
+    // Check for Notion token first
+    var token = GM_getValue('notion_token', '');
+    if (!token) {
+      var configured = promptForToken();
       if (!configured) return;
     }
 
@@ -431,7 +438,7 @@
     }
 
     try {
-      await postToSheet(data);
+      await postToNotion(data);
       markUrlSaved(window.location.href);
       setButtonState('saved', 'Saved');
     } catch (err) {
