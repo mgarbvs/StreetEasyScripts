@@ -21,8 +21,9 @@
   // --- Configuration ---
   const OFFICES = [
     { lat: 40.75337, lon: -73.98494, label: '12 W 39th St' },
-    { lat: 40.75816, lon: -73.98554, label: 'Times Square' },
     { lat: 40.74844, lon: -73.98566, label: 'Penn Station' },
+    { lat: 40.71475, lon: -73.99335, label: 'Clandestino' },
+    { lat: 40.72631, lon: -73.954561, label: 'Twin Lounge' },
   ];
   const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
   const GEOCODE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
