@@ -1,12 +1,11 @@
 // ==UserScript==
 // @name         StreetEasy Viewed Listings
 // @namespace    https://streeteasy.com/
-// @version      1.0.0
+// @version      1.1.0
 // @description  Marks apartment listings you've already visited in StreetEasy search results
 // @match        https://streeteasy.com/for-rent/*
 // @match        https://streeteasy.com/for-sale/*
-// @match        https://streeteasy.com/rental/*
-// @match        https://streeteasy.com/sale/*
+// @match        https://streeteasy.com/building/*
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @run-at       document-idle
@@ -31,23 +30,30 @@
     GM_setValue(STORAGE_KEY, JSON.stringify(viewed));
   }
 
-  function markViewed(listingId) {
+  function markViewed(listingKey) {
     const viewed = loadViewed();
-    if (!viewed[listingId]) {
-      viewed[listingId] = Date.now();
+    if (!viewed[listingKey]) {
+      viewed[listingKey] = Date.now();
       saveViewed(viewed);
     }
   }
 
-  function isViewed(listingId) {
-    return !!loadViewed()[listingId];
+  function isViewed(listingKey) {
+    return !!loadViewed()[listingKey];
   }
 
-  // --- ID extraction ---
-  // StreetEasy listing URLs look like /rental/1234567-address-st or /sale/1234567-address-st
-  function listingIdFromHref(href) {
-    const m = href.match(/\/(rental|sale)\/(\d+)/);
-    return m ? m[2] : null;
+  // --- Key extraction ---
+  // StreetEasy listing URLs: /building/SLUG/UNIT
+  // Use the full path (lowercase) as the stable key.
+  function listingKeyFromHref(href) {
+    try {
+      const url = new URL(href, window.location.origin);
+      // Must be a /building/ path with at least two segments after it
+      const m = url.pathname.match(/^\/building\/[^/]+\/[^/]+/);
+      return m ? m[0].toLowerCase() : null;
+    } catch (e) {
+      return null;
+    }
   }
 
   // --- Badge injection ---
@@ -57,25 +63,42 @@
     const style = document.createElement('style');
     style.id = 'se-viewed-styles';
     style.textContent = `
+      /* "Viewed" tag — styled to match SE's own floating tags */
       .se-viewed-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        background: rgba(30, 30, 30, 0.78);
+        color: #fff;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        padding: 3px 8px;
+        border-radius: 4px;
+        pointer-events: none;
+        line-height: 1.5;
+        white-space: nowrap;
+      }
+
+      /* Left-side tag column (SE only ships a right column) */
+      .se-viewed-left-tags {
         position: absolute;
         top: 8px;
         left: 8px;
         z-index: 10;
-        background: rgba(0, 0, 0, 0.65);
-        color: #fff;
-        font-size: 11px;
-        font-weight: 600;
-        letter-spacing: 0.04em;
-        padding: 3px 7px;
-        border-radius: 3px;
-        pointer-events: none;
-        line-height: 1.4;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
       }
+
+      /* Dim the whole card so viewed listings recede visually */
       .se-viewed-card {
-        opacity: 0.6;
+        opacity: 0.55;
+        transition: opacity 0.15s;
       }
-      .se-viewed-card:hover {
+      .se-viewed-card:hover,
+      .se-viewed-card:focus-within {
         opacity: 1;
       }
     `;
@@ -84,66 +107,72 @@
 
   function addBadge(card) {
     if (card.querySelector('.se-viewed-badge')) return;
-    // Make sure the card has position so the absolute badge is contained
-    const pos = getComputedStyle(card).position;
-    if (pos === 'static') card.style.position = 'relative';
+
+    // Anchor the badge inside the image container so it sits over the photo
+    const imageContainer = card.querySelector('[class*="ImageContainer-module__imageContainer"]');
+    const anchor = imageContainer || card;
+
+    // Ensure the anchor is positioned
+    if (getComputedStyle(anchor).position === 'static') {
+      anchor.style.position = 'relative';
+    }
+
+    // Create (or reuse) the left-tags column
+    let leftCol = anchor.querySelector('.se-viewed-left-tags');
+    if (!leftCol) {
+      leftCol = document.createElement('div');
+      leftCol.className = 'se-viewed-left-tags';
+      anchor.appendChild(leftCol);
+    }
 
     const badge = document.createElement('div');
     badge.className = 'se-viewed-badge';
     badge.textContent = 'Viewed';
-    card.prepend(badge);
+    leftCol.appendChild(badge);
+
     card.classList.add('se-viewed-card');
   }
 
   // --- Card processing ---
 
-  // Finds the anchor element that links to the listing page within a card
-  function findListingAnchor(card) {
-    // Primary: a direct <a> on the card itself
-    if (card.tagName === 'A' && listingIdFromHref(card.href || '')) return card;
-    // Otherwise look for the first <a> pointing to a rental/sale path
-    return card.querySelector('a[href*="/rental/"], a[href*="/sale/"]');
+  // Returns the href of the primary listing link within a card, or null
+  function findListingHref(card) {
+    // The image link and address link both point to the building/unit page
+    const anchor = card.querySelector('a[href*="/building/"]');
+    return anchor ? anchor.getAttribute('href') : null;
   }
 
   function processCard(card) {
     if (card.dataset.seViewedProcessed) return;
     card.dataset.seViewedProcessed = '1';
 
-    const anchor = findListingAnchor(card);
-    if (!anchor) return;
+    const href = findListingHref(card);
+    if (!href) return;
 
-    const listingId = listingIdFromHref(anchor.getAttribute('href') || '');
-    if (!listingId) return;
+    const key = listingKeyFromHref(href);
+    if (!key) return;
 
-    // Show badge if already viewed
-    if (isViewed(listingId)) {
+    if (isViewed(key)) {
       addBadge(card);
     }
 
-    // Record a view when the user clicks through
-    anchor.addEventListener('click', () => {
-      markViewed(listingId);
-      // Optimistically add the badge in case they come back via back-button
+    // Record the click when the user opens the listing (links open in new tab)
+    card.addEventListener('click', (e) => {
+      if (!e.target.closest('a[href*="/building/"]')) return;
+      markViewed(key);
       addBadge(card);
-    });
+    }, { capture: true });
   }
 
-  // --- On a listing detail page, record it immediately ---
-  function recordCurrentListingPage() {
-    const m = window.location.pathname.match(/\/(rental|sale)\/(\d+)/);
-    if (m) markViewed(m[2]);
+  // --- On a building detail page, record it immediately ---
+  function recordCurrentPage() {
+    const key = listingKeyFromHref(window.location.href);
+    if (key) markViewed(key);
   }
 
   // --- Find all listing cards on a search results page ---
-  // StreetEasy search result cards share a common pattern; we target the
-  // wrapping list item / article elements.
   function findCards(root) {
-    return root.querySelectorAll(
-      '[data-testid="search-result-item"], ' +       // newer layout
-      '.searchCardList--listItem, ' +                // older layout
-      'li[class*="SearchResultsList"], ' +
-      'article[class*="SearchCard"]'
-    );
+    return root.querySelectorAll('[data-testid="listing-card"]');
   }
 
   function processAll() {
@@ -156,22 +185,16 @@
   // --- MutationObserver for infinite-scroll / pagination ---
   function observeNewCards() {
     const observer = new MutationObserver((mutations) => {
+      let found = false;
       for (const m of mutations) {
         for (const node of m.addedNodes) {
           if (node.nodeType !== Node.ELEMENT_NODE) continue;
-          // If the node itself is a card
-          if (node.matches && node.matches(
-            '[data-testid="search-result-item"], ' +
-            '.searchCardList--listItem, ' +
-            'li[class*="SearchResultsList"], ' +
-            'article[class*="SearchCard"]'
-          )) {
-            injectStyles();
+          if (node.matches('[data-testid="listing-card"]')) {
+            if (!found) { injectStyles(); found = true; }
             processCard(node);
           }
-          // Or contains cards (e.g. a container was added)
           for (const card of findCards(node)) {
-            injectStyles();
+            if (!found) { injectStyles(); found = true; }
             processCard(card);
           }
         }
@@ -182,7 +205,7 @@
   }
 
   // --- Entry point ---
-  recordCurrentListingPage();
+  recordCurrentPage();
   processAll();
   observeNewCards();
 
