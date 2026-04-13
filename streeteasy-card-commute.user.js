@@ -64,7 +64,10 @@
   // --- API key storage ---
   function getApiKey() { return GM_getValue(API_KEY_STORAGE, ''); }
   function setApiKey(k) { GM_setValue(API_KEY_STORAGE, k); }
-  function clearApiKey() { GM_setValue(API_KEY_STORAGE, ''); }
+
+  // Show the "key rejected" alert at most once per session/key so we don't
+  // spam the user with one dialog per card.
+  let deniedAlertShown = false;
 
   // --- Dynamic departure: next Monday 8:30 AM, strictly in the future ---
   function nextMonday830Epoch() {
@@ -129,14 +132,18 @@
       '&departure_time=' + nextMonday830Epoch() +
       '&key=' + encodeURIComponent(key);
 
+    console.debug('[SE-Commute] fetching commute for', address);
     const res = await gmFetch(url);
+    console.debug('[SE-Commute] distancematrix response:', res);
 
     if (res.status === 'REQUEST_DENIED') {
-      clearApiKey();
-      throw new Error('REQUEST_DENIED');
+      const detail = res.error_message || 'Request denied (no detail)';
+      throw new Error('REQUEST_DENIED|' + detail);
     }
     if (res.status === 'OVER_QUERY_LIMIT') throw new Error('OVER_QUERY_LIMIT');
-    if (res.status !== 'OK') throw new Error(res.status || 'UNKNOWN');
+    if (res.status !== 'OK') {
+      throw new Error((res.status || 'UNKNOWN') + (res.error_message ? '|' + res.error_message : ''));
+    }
 
     const element = res.rows && res.rows[0] && res.rows[0].elements && res.rows[0].elements[0];
     if (!element) throw new Error('NO_ELEMENT');
@@ -286,11 +293,32 @@
         }
       } catch (err) {
         const msg = err.message || 'UNKNOWN';
-        if (msg === 'NO_KEY' || msg === 'REQUEST_DENIED') {
+        if (msg === 'NO_KEY') {
           updateAllMatchingCards(address, { type: 'no-key' });
+        } else if (msg.startsWith('REQUEST_DENIED|')) {
+          const detail = msg.slice('REQUEST_DENIED|'.length);
+          console.error('[SE-Commute] Google Maps API key rejected:', detail);
+          if (!deniedAlertShown) {
+            deniedAlertShown = true;
+            alert(
+              'Google Maps API rejected your key:\n\n' + detail +
+              '\n\nCommon causes:\n' +
+              '• Distance Matrix API not enabled on your GCP project\n' +
+              '• HTTP referer restrictions don\'t include https://streeteasy.com/*\n' +
+              '• Key was just created — wait ~5 min for propagation\n' +
+              '• Billing not enabled on the GCP project\n\n' +
+              'Click the ⚙ to update the key, then reload the page.'
+            );
+          }
+          updateAllMatchingCards(address, { type: 'error', message: 'key denied' });
+          // Stop hammering the API with the same bad key
+          queue.length = 0;
+          queuedAddresses.clear();
+          break;
         } else if (msg === 'OVER_QUERY_LIMIT') {
           updateAllMatchingCards(address, { type: 'error', message: 'Quota exceeded' });
         } else {
+          console.warn('[SE-Commute] fetch failed for', address, msg);
           updateAllMatchingCards(address, { type: 'error', message: msg });
         }
       }
@@ -339,10 +367,13 @@
     intersectionObserver.observe(card);
   }
 
-  // Re-run processing on cards that previously rendered "no-key" after the
-  // user enters a key.
-  function reprocessNoKeyCards() {
-    for (const card of document.querySelectorAll('[data-testid="listing-card"][data-se-commute-state="no-key"]')) {
+  // Re-run processing on cards that failed (no-key or error) after the user
+  // enters or updates a key.
+  function reprocessFailedCards() {
+    const selector =
+      '[data-testid="listing-card"][data-se-commute-state="no-key"], ' +
+      '[data-testid="listing-card"][data-se-commute-state="error"]';
+    for (const card of document.querySelectorAll(selector)) {
       delete card.dataset.seCommuteProcessed;
       delete card.dataset.seCommuteState;
       processCard(card);
@@ -368,6 +399,7 @@
     const k = prompt(msg, current);
     if (k && k.trim()) {
       setApiKey(k.trim());
+      deniedAlertShown = false; // fresh key, give it a fresh chance to alert
       return true;
     }
     return false;
@@ -381,7 +413,7 @@
     btn.textContent = '\u2699';
     btn.title = 'Configure Google Maps API key';
     btn.addEventListener('click', () => {
-      if (promptForKey()) reprocessNoKeyCards();
+      if (promptForKey()) reprocessFailedCards();
     });
     document.body.appendChild(btn);
   }
@@ -391,7 +423,7 @@
     const target = e.target;
     if (target && target.matches && target.matches('[data-se-setup="1"]')) {
       e.preventDefault();
-      if (promptForKey()) reprocessNoKeyCards();
+      if (promptForKey()) reprocessFailedCards();
     }
   });
 
