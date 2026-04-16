@@ -10,6 +10,10 @@
 
 ## Next Up
 
+### Adding pins to the StreetEasy map view based on commute / special locations.
+
+### [Nice to have] Support for an Inclusive OR for Laundry in Unit / Building 
+
 ### Violent Crime / NYPD Data Integration
 Add actual crime data to the 311 script (or as a new companion section).
 
