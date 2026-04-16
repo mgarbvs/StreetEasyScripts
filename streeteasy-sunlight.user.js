@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         StreetEasy Sunlight Estimator
 // @namespace    https://streeteasy.com/
-// @version      1.0.0
-// @description  Estimates sunlight exposure based on NYC PLUTO building data and floor number
+// @version      1.1.0
+// @description  Estimates sunlight exposure based on NYC PLUTO and NJ MOD-IV building data and floor number
 // @match        https://streeteasy.com/building/*
 // @match        https://streeteasy.com/rental/*
 // @match        https://streeteasy.com/sale/*
@@ -11,6 +11,7 @@
 // @grant        GM_setValue
 // @connect      data.cityofnewyork.us
 // @connect      nominatim.openstreetmap.org
+// @connect      services2.arcgis.com
 // @run-at       document-idle
 // @updateURL    https://raw.githubusercontent.com/mgarbvs/StreetEasyScripts/main/streeteasy-sunlight.user.js
 // @downloadURL  https://raw.githubusercontent.com/mgarbvs/StreetEasyScripts/main/streeteasy-sunlight.user.js
@@ -23,6 +24,7 @@
   const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
   const GEOCODE_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
   const PLUTO_BASE = 'https://data.cityofnewyork.us/resource/64uk-42ks.json';
+  const NJ_MODIV_BASE = 'https://services2.arcgis.com/XVOqAjTOJ5P6ngMu/arcgis/rest/services/Parcels_Composite_NJ_WM/FeatureServer/0/query';
   const NOMINATIM_BASE = 'https://nominatim.openstreetmap.org';
   const SEARCH_RADIUS_M = 100; // meters to search for surrounding buildings
   const FT_PER_FLOOR = 10; // approximate feet per floor
@@ -92,13 +94,32 @@
     return div.innerHTML;
   }
 
+  // --- City detection ---
+  function detectCity() {
+    var titleMatch = document.title.match(/\s+in\s+(.+?)(?:\s*\||$)/);
+    if (titleMatch) {
+      var neighborhood = titleMatch[1].trim();
+      if (/jersey\s*city/i.test(neighborhood)) return 'JC';
+      if (/hoboken/i.test(neighborhood)) return 'HOBOKEN';
+    }
+    return 'NYC';
+  }
+
+  function getAddressSuffix() {
+    var city = detectCity();
+    if (city === 'JC') return ', Jersey City, NJ';
+    if (city === 'HOBOKEN') return ', Hoboken, NJ';
+    return ', New York, NY';
+  }
+
   // --- Address extraction ---
   function getAddress() {
+    const suffix = getAddressSuffix();
     const title = document.title;
     const match = title.match(/^(.+?)\s+in\s+/);
-    if (match) return match[1].trim() + ', New York, NY';
+    if (match) return match[1].trim() + suffix;
     const h1 = document.querySelector('h1');
-    if (h1) return h1.textContent.trim() + ', New York, NY';
+    if (h1) return h1.textContent.trim() + suffix;
     return null;
   }
 
@@ -188,6 +209,65 @@
     const url = `${PLUTO_BASE}?$where=${encodeURIComponent(where)}&$select=${encodeURIComponent(select)}&$limit=${BUILDING_LIMIT}`;
 
     return gmFetch(url);
+  }
+
+  // --- NJ MOD-IV data fetching ---
+  function computeCentroid(rings) {
+    let totalLat = 0;
+    let totalLon = 0;
+    let count = 0;
+    for (const ring of rings) {
+      for (const coord of ring) {
+        totalLon += coord[0];
+        totalLat += coord[1];
+        count++;
+      }
+    }
+    if (count === 0) return null;
+    return { lat: totalLat / count, lon: totalLon / count };
+  }
+
+  async function fetchNJBuildingData(lat, lon) {
+    const url = NJ_MODIV_BASE +
+      '?geometry=' + lon + ',' + lat +
+      '&geometryType=esriGeometryPoint' +
+      '&inSR=4326' +
+      '&spatialRel=esriSpatialRelIntersects' +
+      '&distance=' + SEARCH_RADIUS_M +
+      '&units=esriSRUnit_Meter' +
+      '&outFields=PAMS_PIN,PROP_LOC,BLDG_DESC,YR_CONSTR,CALC_ACRE' +
+      '&returnGeometry=true' +
+      '&outSR=4326' +
+      '&f=json' +
+      '&resultRecordCount=' + BUILDING_LIMIT;
+
+    const data = await gmFetch(url);
+    if (!data || !data.features || !Array.isArray(data.features)) {
+      return [];
+    }
+
+    const buildings = [];
+    for (const feature of data.features) {
+      const attr = feature.attributes || {};
+      var match = (attr.BLDG_DESC || '').match(/^(\d+)S/);
+      var floors = match ? parseInt(match[1], 10) : 0;
+      if (floors <= 0) continue;
+
+      let centroid = null;
+      if (feature.geometry && feature.geometry.rings) {
+        centroid = computeCentroid(feature.geometry.rings);
+      }
+      if (!centroid) continue;
+
+      buildings.push({
+        latitude: centroid.lat,
+        longitude: centroid.lon,
+        heightroof: floors * FT_PER_FLOOR,
+        numfloors: floors,
+      });
+    }
+
+    return buildings;
   }
 
   // --- Directional analysis ---
@@ -413,9 +493,10 @@
         '</div>' +
         // Methodology note
         '<div style="margin-top:12px;font-size:11px;color:#999;line-height:1.5;">' +
-          'Based on NYC PLUTO building height data within ' + SEARCH_RADIUS_M + 'm. ' +
+          'Based on NYC PLUTO building height data (or NJ MOD-IV parcel data for NJ listings) within ' + SEARCH_RADIUS_M + 'm. ' +
           'South-facing exposure weighted higher (best daylight in Northern Hemisphere). ' +
-          'Estimates only — does not account for window placement or trees.' +
+          'Estimates only — does not account for window placement or trees. ' +
+          'NJ heights are estimated from story count in MOD-IV BLDG_DESC field.' +
         '</div>' +
         errorHtml +
         '<div style="margin-top:8px;font-size:11px;color:#999;">' +
@@ -527,10 +608,19 @@
       // 2. Extract floor number
       const floorData = extractFloor();
 
-      // 3. Fetch PLUTO building data
-      const buildings = await fetchPLUTOBuildings(coords.lat, coords.lon);
-      if (!buildings || !Array.isArray(buildings)) {
-        throw new Error('No PLUTO data returned');
+      // 3. Fetch building data (PLUTO for NYC, MOD-IV for NJ)
+      const city = detectCity();
+      let buildings;
+      if (city === 'NYC') {
+        buildings = await fetchPLUTOBuildings(coords.lat, coords.lon);
+        if (!buildings || !Array.isArray(buildings)) {
+          throw new Error('No PLUTO data returned');
+        }
+      } else {
+        buildings = await fetchNJBuildingData(coords.lat, coords.lon);
+        if (!buildings || !Array.isArray(buildings) || buildings.length === 0) {
+          throw new Error('No NJ MOD-IV data returned');
+        }
       }
 
       // 4. Determine listing height
