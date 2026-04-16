@@ -566,6 +566,9 @@
       return;
     }
     isRunning = true;
+
+    OFFICES = loadOffices();
+
     const t0 = performance.now();
     console.debug(`[CommuteTracker] main() start — address: "${address}"`);
     currentAddress = address;
