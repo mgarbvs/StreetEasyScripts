@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         StreetEasy Laundry OR Filter
 // @namespace    https://streeteasy.com/
-// @version      1.0.0
+// @version      1.1.0
 // @description  Adds a toggle to combine "Laundry in Unit" and "Laundry in Building" filters with inclusive OR
 // @match        https://streeteasy.com/for-rent/*
 // @match        https://streeteasy.com/for-sale/*
@@ -215,12 +215,10 @@
 
     container.appendChild(pills);
 
-    // Find a good injection point: look for the search results header area
     const injected = tryInject(container);
     if (!injected) {
-      // Fallback: inject as a floating element at top
       container.style.position = 'fixed';
-      container.style.top = '70px';
+      container.style.top = '120px';
       container.style.right = '20px';
       container.style.zIndex = '10000';
       document.body.appendChild(container);
@@ -230,41 +228,41 @@
   }
 
   function tryInject(container) {
-    // Try to inject near StreetEasy's filter bar area
-    // Look for common anchor elements in the search results page
-    const selectors = [
-      // Filter summary / applied filters area
-      '[data-testid="applied-filters"]',
-      '.FiltersSummary',
-      '.applied-filters',
-      // Search results header
-      '.searchResultsHeader',
-      '.search-results-header',
-      '[data-testid="search-results-header"]',
-      // Results count area
-      '.result-count',
-      '.ResultCount',
-      '[class*="resultCount"]',
-      '[class*="ResultCount"]',
-      // Sort bar area
-      '.SortBar',
-      '.sort-bar',
-      '[data-testid="sort-bar"]',
-      // Main content area - broader fallback
-      '#search-results',
-      '.SearchResultsPage',
-      '[data-testid="search-results"]',
-      'main',
+    const strategies = [
+      {
+        sel: '[data-testid="desktop-filter"]',
+        inject: (anchor) => {
+          anchor.parentNode.insertBefore(container, anchor.nextSibling);
+        },
+      },
+      {
+        sel: '[data-testid="sort-by-trigger-id"]',
+        inject: (anchor) => {
+          const wrapper = anchor.closest('div') || anchor.parentNode;
+          wrapper.parentNode.insertBefore(container, wrapper.nextSibling);
+        },
+      },
+      {
+        sel: '[data-testid="mobile-filter"]',
+        inject: (anchor) => {
+          anchor.parentNode.insertBefore(container, anchor.nextSibling);
+        },
+      },
+      {
+        sel: 'main',
+        inject: (anchor) => {
+          anchor.insertBefore(container, anchor.firstChild);
+        },
+      },
     ];
 
-    for (const sel of selectors) {
+    for (const { sel, inject } of strategies) {
       const anchor = document.querySelector(sel);
       if (anchor) {
-        // Insert before the anchor or as its first child
-        if (anchor.parentNode) {
-          anchor.parentNode.insertBefore(container, anchor);
+        try {
+          inject(anchor);
           return true;
-        }
+        } catch (_) { /* try next strategy */ }
       }
     }
 
