@@ -87,6 +87,16 @@
     return m > 0 ? `${h} hr ${m} min` : `${h} hr`;
   }
 
+  // --- City detection for search pages (no "About the building" available) ---
+  function getSearchCitySuffix() {
+    const crumbs = document.querySelectorAll('nav[aria-label="breadcrumb"] a');
+    for (const a of crumbs) {
+      if (/\/jersey-city\b/.test(a.href)) return ', Jersey City, NJ';
+      if (/\/hoboken\b/.test(a.href)) return ', Hoboken, NJ';
+    }
+    return ', New York, NY';
+  }
+
   // --- Card address extraction ---
   function cardAddress(card) {
     const anchor =
@@ -95,7 +105,7 @@
     if (!anchor) return null;
     const text = anchor.textContent.trim();
     if (!text) return null;
-    return text + ', New York, NY';
+    return text;
   }
 
   // --- HTTP ---
@@ -123,7 +133,7 @@
     const key = getApiKey();
     if (!key) throw new Error('NO_KEY');
 
-    const origin = stripUnit(address) + ', New York, NY';
+    const origin = stripUnit(address) + getSearchCitySuffix();
     const url =
       'https://maps.googleapis.com/maps/api/distancematrix/json' +
       '?origins=' + encodeURIComponent(origin) +
@@ -160,7 +170,7 @@
   }
 
   function googleMapsLink(address) {
-    const origin = encodeURIComponent(stripUnit(address) + ', New York, NY');
+    const origin = encodeURIComponent(stripUnit(address) + getSearchCitySuffix());
     const dest = encodeURIComponent(DEST.query);
     return `https://maps.google.com/maps?saddr=${origin}&daddr=${dest}&dirflg=r`;
   }

@@ -119,7 +119,25 @@
   }
 
   // --- Address extraction ---
+  function getBuildingAddress() {
+    var headings = document.querySelectorAll('h2');
+    for (var i = 0; i < headings.length; i++) {
+      if (/about the building/i.test(headings[i].textContent)) {
+        var section = headings[i].parentElement;
+        if (!section) continue;
+        var paragraphs = section.querySelectorAll('p');
+        for (var j = 0; j < paragraphs.length; j++) {
+          var text = paragraphs[j].textContent.trim();
+          if (/,\s*[A-Z]{2}\s+\d{5}/.test(text)) return text;
+        }
+      }
+    }
+    return null;
+  }
+
   function getAddress() {
+    var buildingAddr = getBuildingAddress();
+    if (buildingAddr) return buildingAddr;
     var title = document.title;
     var match = title.match(/^(.+?)\s+in\s+/);
     if (match) return match[1].trim() + ', New York, NY';
