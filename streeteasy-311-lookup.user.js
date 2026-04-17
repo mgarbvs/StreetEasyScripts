@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         StreetEasy 311 Complaint Lookup
 // @namespace    https://streeteasy.com/
-// @version      1.1.1
-// @description  Shows recent 311 complaints at and near a StreetEasy listing address
+// @version      1.2.0
+// @description  Shows recent 311/SeeClickFix complaints at and near a StreetEasy listing address
 // @match        https://streeteasy.com/building/*
 // @match        https://streeteasy.com/rental/*
 // @match        https://streeteasy.com/sale/*
@@ -11,6 +11,7 @@
 // @grant        GM_setValue
 // @connect      nominatim.openstreetmap.org
 // @connect      data.cityofnewyork.us
+// @connect      seeclickfix.com
 // @run-at       document-idle
 // @updateURL    https://raw.githubusercontent.com/mgarbvs/StreetEasyScripts/main/streeteasy-311-lookup.user.js
 // @downloadURL  https://raw.githubusercontent.com/mgarbvs/StreetEasyScripts/main/streeteasy-311-lookup.user.js
@@ -26,30 +27,45 @@
   const COMPLAINT_LIMIT = 200;
   const NYC_311_BASE = 'https://data.cityofnewyork.us/resource/erm2-nwe9.json';
   const NOMINATIM_BASE = 'https://nominatim.openstreetmap.org';
+  const SEECLICKFIX_BASE = 'https://seeclickfix.com/api/v2/issues';
+  const SCF_LAT_DELTA = 0.00135; // ~150m
+  const SCF_LNG_DELTA = 0.00176; // ~150m
 
   // --- Safety-relevant complaint categories ---
   const SAFETY_CATEGORIES = {
     'Crime / Disorder': [
       'Drug Activity', 'Disorderly Youth', 'Panhandling',
       'Urinating in Public', 'Illegal Fireworks',
+      // SeeClickFix equivalents
+      'Vandalism', 'Abandoned Vehicle', 'Illegal Activity',
     ],
     'Noise': [
       'Noise - Residential', 'Noise - Commercial', 'Noise',
       'Noise - Street/Sidewalk', 'Noise - Vehicle', 'Noise - Helicopter',
       'Noise - Park', 'Noise - House of Worship',
+      // SeeClickFix equivalents
+      'Noise Complaint', 'Noise Disturbance',
     ],
     'Homelessness': [
       'Homeless Person Assistance', 'Homeless Encampment', 'Homeless Street Condition',
+      // SeeClickFix equivalents
+      'Encampment',
     ],
     'Building / Safety': [
       'HEAT/HOT WATER', 'PLUMBING', 'PAINT/PLASTER', 'ELEVATOR',
       'Fire Safety Director', 'Building/Use', 'Maintenance or Facility',
       'UNSANITARY CONDITION', 'Water System', 'General Construction/Plumbing',
       'ELECTRIC', 'FLOORING/STAIRS', 'DOOR/WINDOW', 'SAFETY',
+      // SeeClickFix equivalents
+      'Building Complaint', 'Unsafe Structure', 'Fire Hazard', 'Code Violation',
+      'Property Maintenance', 'Building Code Violation',
     ],
     'Pest / Sanitation': [
       'Rodent', 'PEST CONTROL EXTERMINATION', 'Sanitation Condition',
       'Dirty Conditions', 'Graffiti', 'Illegal Dumping',
+      // SeeClickFix equivalents
+      'Trash', 'Litter', 'Rat Sighting', 'Missed Trash Pick Up',
+      'Overflowing Trash Can', 'Dumping',
     ],
   };
 
@@ -115,6 +131,34 @@
     return div.innerHTML;
   }
 
+  // --- City detection ---
+  function detectCity() {
+    var addr = getBuildingAddress();
+    if (addr && /,\s*NJ\s+\d{5}/.test(addr)) {
+      if (/jersey\s*city/i.test(addr)) return 'JC';
+      if (/hoboken/i.test(addr)) return 'HOBOKEN';
+      return 'JC';
+    }
+    var titleMatch = document.title.match(/\s+in\s+(.+?)(?:\s*\||$)/);
+    if (titleMatch) {
+      var neighborhood = titleMatch[1].trim();
+      if (/jersey\s*city/i.test(neighborhood)) return 'JC';
+      if (/hoboken/i.test(neighborhood)) return 'HOBOKEN';
+    }
+    return 'NYC';
+  }
+
+  function getAddressSuffix() {
+    var city = detectCity();
+    if (city === 'JC') return ', Jersey City, NJ';
+    if (city === 'HOBOKEN') return ', Hoboken, NJ';
+    return ', New York, NY';
+  }
+
+  function isNJCity(city) {
+    return city === 'JC' || city === 'HOBOKEN';
+  }
+
   // --- Address extraction ---
   function getBuildingAddress() {
     const headings = document.querySelectorAll('h2');
@@ -135,11 +179,12 @@
   function getAddress() {
     const buildingAddr = getBuildingAddress();
     if (buildingAddr) return buildingAddr;
+    const suffix = getAddressSuffix();
     const title = document.title;
     const match = title.match(/^(.+?)\s+in\s+/);
-    if (match) return match[1].trim() + ', New York, NY';
+    if (match) return match[1].trim() + suffix;
     const h1 = document.querySelector('h1');
-    if (h1) return h1.textContent.trim() + ', New York, NY';
+    if (h1) return h1.textContent.trim() + suffix;
     return null;
   }
 
@@ -203,6 +248,49 @@
     const where = `upper(incident_address) = '${normalizedAddr}' AND created_date > '${dateFloor}'`;
     const url = `${NYC_311_BASE}?$where=${encodeURIComponent(where)}&$order=created_date DESC&$limit=${COMPLAINT_LIMIT}`;
     return gmFetch(url);
+  }
+
+  // --- SeeClickFix API ---
+  function fetchSeeClickFixByRadius(lat, lon) {
+    const dateFloor = new Date();
+    dateFloor.setFullYear(dateFloor.getFullYear() - 1);
+    const afterDate = dateFloor.toISOString();
+    const url = `${SEECLICKFIX_BASE}?min_lat=${lat - SCF_LAT_DELTA}&min_lng=${lon - SCF_LNG_DELTA}` +
+      `&max_lat=${lat + SCF_LAT_DELTA}&max_lng=${lon + SCF_LNG_DELTA}` +
+      `&after=${encodeURIComponent(afterDate)}&per_page=100&page=1` +
+      `&status=open,acknowledged,closed,archived`;
+    return new Promise((resolve, reject) => {
+      GM_xmlhttpRequest({
+        method: 'GET',
+        url,
+        headers: {
+          'Accept': 'application/json',
+          'User-Agent': 'StreetEasy311Lookup/1.2.0',
+        },
+        onload: (res) => {
+          if (res.status >= 200 && res.status < 300) {
+            try {
+              const data = JSON.parse(res.responseText);
+              resolve(data.issues || data || []);
+            } catch (e) { reject(new Error('JSON parse error')); }
+          } else {
+            reject(new Error(`HTTP ${res.status}`));
+          }
+        },
+        onerror: (err) => reject(err),
+      });
+    });
+  }
+
+  function mapSeeClickFixToComplaint(issue) {
+    return {
+      complaint_type: (issue.request_type && issue.request_type.title) || issue.summary || 'Unknown',
+      descriptor: issue.description || '',
+      created_date: issue.created_at,
+      status: issue.status,
+      unique_key: String(issue.id),
+      incident_address: issue.address || '',
+    };
   }
 
   // --- Data processing ---
@@ -289,6 +377,7 @@
     const totalCount = data.buildingComplaints.length + data.nearbyComplaints.length;
     const buildingCount = data.buildingComplaints.length;
     const safetyCount = [...data.buildingComplaints, ...data.nearbyComplaints].filter((c) => c.isSafety).length;
+    const cardTitle = data.source === 'seeclickfix' ? '311 / SeeClickFix Complaints' : '311 Complaints';
 
     // Summary badges
     const summaryItems = summarizeByType([...data.buildingComplaints, ...data.nearbyComplaints]);
@@ -313,7 +402,7 @@
       <div id="${mainId}-header" style="cursor:pointer;user-select:none;">
         <div style="display:flex;align-items:center;justify-content:space-between;">
           <div style="font-size:16px;font-weight:700;color:#333;">
-            311 Complaints
+            ${cardTitle}
             <span id="${mainId}-toggle-hint" style="font-size:12px;color:#62646A;font-weight:400;margin-left:8px;">click to expand</span>
           </div>
           <div style="font-size:13px;color:#62646A;">
@@ -441,7 +530,9 @@
       border: 1px solid #E6E6E6; border-radius: 8px; padding: 16px 20px; margin: 16px 0;
       background: #FFFFFF; color: #62646A; font-size: 14px;
     `;
-    loadingCard.textContent = 'Loading 311 complaint data…';
+    const city = detectCity();
+    const isNJ = isNJCity(city);
+    loadingCard.textContent = isNJ ? 'Loading SeeClickFix complaint data…' : 'Loading 311 complaint data…';
     injectCard(loadingCard);
 
     try {
@@ -452,31 +543,53 @@
           buildingComplaints: [],
           nearbyComplaints: [],
           error: `Could not geocode "${address}".`,
+          source: isNJ ? 'seeclickfix' : 'nyc311',
         };
         injectCard(createCard(errorData));
         return;
       }
 
-      const normalizedAddr = normalizeAddress(address);
+      let allBuilding, allNearby;
 
-      // Fetch building-specific and radius-based complaints in parallel
-      const [buildingRaw, areaRaw] = await Promise.all([
-        fetch311ByAddress(normalizedAddr).catch(() => []),
-        fetch311ByRadius(coords.lat, coords.lon).catch(() => []),
-      ]);
+      if (isNJ) {
+        // --- SeeClickFix path for Jersey City / Hoboken ---
+        const scfRaw = await fetchSeeClickFixByRadius(coords.lat, coords.lon).catch(() => []);
+        const mapped = (Array.isArray(scfRaw) ? scfRaw : []).map(mapSeeClickFixToComplaint);
 
-      // Deduplicate: area results that match the building address go in building list
-      const buildingKeys = new Set(buildingRaw.map((c) => c.unique_key));
-      const nearbyOnly = areaRaw.filter((c) => !buildingKeys.has(c.unique_key));
+        const normalizedAddr = normalizeAddress(address);
 
-      // Also move area complaints with matching address to building list
-      const buildingFromArea = nearbyOnly.filter(
-        (c) => (c.incident_address || '').toUpperCase().replace(/\s+/g, ' ').trim() === normalizedAddr
-      );
-      const buildingFromAreaKeys = new Set(buildingFromArea.map((c) => c.unique_key));
+        // Split into building-specific and nearby based on address match
+        const buildingMatches = mapped.filter(
+          (c) => (c.incident_address || '').toUpperCase().replace(/\s+/g, ' ').trim() === normalizedAddr
+        );
+        const buildingKeys = new Set(buildingMatches.map((c) => c.unique_key));
+        const nearby = mapped.filter((c) => !buildingKeys.has(c.unique_key));
 
-      const allBuilding = categorizeComplaints([...buildingRaw, ...buildingFromArea]);
-      const allNearby = categorizeComplaints(nearbyOnly.filter((c) => !buildingFromAreaKeys.has(c.unique_key)));
+        allBuilding = categorizeComplaints(buildingMatches);
+        allNearby = categorizeComplaints(nearby);
+      } else {
+        // --- NYC 311 path (unchanged) ---
+        const normalizedAddr = normalizeAddress(address);
+
+        // Fetch building-specific and radius-based complaints in parallel
+        const [buildingRaw, areaRaw] = await Promise.all([
+          fetch311ByAddress(normalizedAddr).catch(() => []),
+          fetch311ByRadius(coords.lat, coords.lon).catch(() => []),
+        ]);
+
+        // Deduplicate: area results that match the building address go in building list
+        const buildingKeys = new Set(buildingRaw.map((c) => c.unique_key));
+        const nearbyOnly = areaRaw.filter((c) => !buildingKeys.has(c.unique_key));
+
+        // Also move area complaints with matching address to building list
+        const buildingFromArea = nearbyOnly.filter(
+          (c) => (c.incident_address || '').toUpperCase().replace(/\s+/g, ' ').trim() === normalizedAddr
+        );
+        const buildingFromAreaKeys = new Set(buildingFromArea.map((c) => c.unique_key));
+
+        allBuilding = categorizeComplaints([...buildingRaw, ...buildingFromArea]);
+        allNearby = categorizeComplaints(nearbyOnly.filter((c) => !buildingFromAreaKeys.has(c.unique_key)));
+      }
 
       // Sort: safety-relevant first, then by date
       const sortFn = (a, b) => {
@@ -490,6 +603,7 @@
         buildingComplaints: allBuilding,
         nearbyComplaints: allNearby,
         address,
+        source: isNJ ? 'seeclickfix' : 'nyc311',
       };
 
       setCache(cacheKey, result);
@@ -499,7 +613,8 @@
       const errorData = {
         buildingComplaints: [],
         nearbyComplaints: [],
-        error: 'Failed to load 311 data. Try refreshing.',
+        error: isNJ ? 'Failed to load SeeClickFix data. Try refreshing.' : 'Failed to load 311 data. Try refreshing.',
+        source: isNJ ? 'seeclickfix' : 'nyc311',
       };
       injectCard(createCard(errorData));
     }

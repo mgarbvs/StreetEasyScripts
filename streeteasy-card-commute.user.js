@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         StreetEasy Card Commute
 // @namespace    https://streeteasy.com/
-// @version      1.0.0
+// @version      1.1.0
 // @description  Shows Google Maps transit time to 12 W 39th on each search-result card
 // @match        https://streeteasy.com/for-rent/*
 // @match        https://streeteasy.com/for-sale/*
@@ -25,6 +25,26 @@
   const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
   const FETCH_SPACING_MS = 150;
   const API_KEY_STORAGE = 'gmaps_api_key';
+
+  // --- City detection ---
+  function detectCity() {
+    const crumbs = document.querySelectorAll('nav[aria-label="breadcrumb"] a');
+    for (const a of crumbs) {
+      if (/\/jersey-city\b/.test(a.href)) return 'JC';
+      if (/\/hoboken\b/.test(a.href)) return 'HOBOKEN';
+    }
+    var url = window.location.href.toLowerCase();
+    if (/jersey[_-]city|jersey%20city/i.test(url)) return 'JC';
+    if (/hoboken/i.test(url)) return 'HOBOKEN';
+    return 'NYC';
+  }
+
+  function getAddressSuffix() {
+    var city = detectCity();
+    if (city === 'JC') return ', Jersey City, NJ';
+    if (city === 'HOBOKEN') return ', Hoboken, NJ';
+    return ', New York, NY';
+  }
 
   // --- Address normalization (matches commute tracker's stripUnit) ---
   function stripUnit(address) {
@@ -87,16 +107,6 @@
     return m > 0 ? `${h} hr ${m} min` : `${h} hr`;
   }
 
-  // --- City detection for search pages (no "About the building" available) ---
-  function getSearchCitySuffix() {
-    const crumbs = document.querySelectorAll('nav[aria-label="breadcrumb"] a');
-    for (const a of crumbs) {
-      if (/\/jersey-city\b/.test(a.href)) return ', Jersey City, NJ';
-      if (/\/hoboken\b/.test(a.href)) return ', Hoboken, NJ';
-    }
-    return ', New York, NY';
-  }
-
   // --- Card address extraction ---
   function cardAddress(card) {
     const anchor =
@@ -105,7 +115,7 @@
     if (!anchor) return null;
     const text = anchor.textContent.trim();
     if (!text) return null;
-    return text;
+    return text + getAddressSuffix();
   }
 
   // --- HTTP ---
@@ -133,7 +143,7 @@
     const key = getApiKey();
     if (!key) throw new Error('NO_KEY');
 
-    const origin = stripUnit(address) + getSearchCitySuffix();
+    const origin = address;
     const url =
       'https://maps.googleapis.com/maps/api/distancematrix/json' +
       '?origins=' + encodeURIComponent(origin) +
@@ -170,7 +180,7 @@
   }
 
   function googleMapsLink(address) {
-    const origin = encodeURIComponent(stripUnit(address) + getSearchCitySuffix());
+    const origin = encodeURIComponent(stripUnit(address) + getAddressSuffix());
     const dest = encodeURIComponent(DEST.query);
     return `https://maps.google.com/maps?saddr=${origin}&daddr=${dest}&dirflg=r`;
   }

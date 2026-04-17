@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         StreetEasy DOB Permits & Complaints
 // @namespace    https://streeteasy.com/
-// @version      1.0.1
-// @description  Shows DOB active permits and complaints for the building and nearby buildings at a StreetEasy listing
+// @version      1.1.0
+// @description  Shows construction permits and complaints for the building and nearby buildings at a StreetEasy listing (NYC + Jersey City/Hoboken)
 // @match        https://streeteasy.com/building/*
 // @match        https://streeteasy.com/rental/*
 // @match        https://streeteasy.com/sale/*
@@ -10,6 +10,8 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @connect      data.cityofnewyork.us
+// @connect      data.nj.gov
+// @connect      services2.arcgis.com
 // @connect      nominatim.openstreetmap.org
 // @run-at       document-idle
 // @updateURL    https://raw.githubusercontent.com/mgarbvs/StreetEasyScripts/main/streeteasy-dob-permits.user.js
@@ -28,6 +30,24 @@
   const DOB_PERMITS_BASE = 'https://data.cityofnewyork.us/resource/ic3t-wcy2.json';
   const DOB_COMPLAINTS_BASE = 'https://data.cityofnewyork.us/resource/eabe-havv.json';
   const NOMINATIM_BASE = 'https://nominatim.openstreetmap.org';
+
+  // NJ API endpoints
+  const NJ_PERMITS_BASE = 'https://data.nj.gov/resource/w9se-dmra.json';
+  const NJ_PARCELS_BASE = 'https://services2.arcgis.com/XVOqAjTOJ5P6ngMu/arcgis/rest/services/Parcels_Composite_NJ_WM/FeatureServer/0/query';
+
+  // NJ permit type mapping to NYC-style job types
+  const NJ_PERMIT_TYPE_MAP = {
+    '04': 'NB', // New Construction
+    '05': 'A1', // Addition
+    '06': 'A1', // Alteration
+    '13': 'DM', // Demolition
+  };
+
+  // NJ permit status labels
+  const NJ_STATUS_LABELS = {
+    'P': 'Permit Issued',
+    'C': 'Certificate Issued',
+  };
 
   // Job type labels and icons
   const JOB_TYPE_LABELS = {
@@ -50,6 +70,36 @@
 
   // Major construction types to highlight and show for nearby
   const MAJOR_JOB_TYPES = new Set(['NB', 'DM']);
+
+  // --- City Detection ---
+  function detectCity() {
+    var addr = getBuildingAddress();
+    if (addr && /,\s*NJ\s+\d{5}/.test(addr)) {
+      if (/jersey\s*city/i.test(addr)) return 'JC';
+      if (/hoboken/i.test(addr)) return 'HOBOKEN';
+      return 'JC';
+    }
+    var titleMatch = document.title.match(/\s+in\s+(.+?)(?:\s*\||$)/);
+    if (titleMatch) {
+      var neighborhood = titleMatch[1].trim();
+      if (/jersey\s*city/i.test(neighborhood)) return 'JC';
+      if (/hoboken/i.test(neighborhood)) return 'HOBOKEN';
+    }
+    return 'NYC';
+  }
+
+  function getAddressSuffix() {
+    var city = detectCity();
+    if (city === 'JC') return ', Jersey City, NJ';
+    if (city === 'HOBOKEN') return ', Hoboken, NJ';
+    return ', New York, NY';
+  }
+
+  function getMunicipalityName(city) {
+    if (city === 'JC') return 'JERSEY CITY';
+    if (city === 'HOBOKEN') return 'HOBOKEN';
+    return null;
+  }
 
   // --- Helpers ---
   function hashString(str) {
@@ -140,9 +190,10 @@
     if (buildingAddr) return buildingAddr;
     var title = document.title;
     var match = title.match(/^(.+?)\s+in\s+/);
-    if (match) return match[1].trim() + ', New York, NY';
+    var suffix = getAddressSuffix();
+    if (match) return match[1].trim() + suffix;
     var h1 = document.querySelector('h1');
-    if (h1) return h1.textContent.trim() + ', New York, NY';
+    if (h1) return h1.textContent.trim() + suffix;
     return null;
   }
 
@@ -157,8 +208,12 @@
   // Parse address into house number and street name for DOB queries
   // e.g. "382 East 10th Street, New York, NY" -> { houseNum: "382", street: "EAST 10 STREET" }
   function parseAddress(address) {
-    // Remove city/state suffix
-    var cleaned = address.replace(/,?\s*New York,?\s*NY\s*\d*/i, '').trim();
+    // Remove city/state suffix (NYC or NJ)
+    var cleaned = address
+      .replace(/,?\s*New York,?\s*NY\s*\d*/i, '')
+      .replace(/,?\s*Jersey City,?\s*NJ\s*\d*/i, '')
+      .replace(/,?\s*Hoboken,?\s*NJ\s*\d*/i, '')
+      .trim();
     // Remove unit/apt
     cleaned = stripUnit(cleaned);
     // Split house number from street
@@ -221,7 +276,7 @@
     return d.toISOString().split('T')[0] + 'T00:00:00';
   }
 
-  // --- DOB Permits API ---
+  // --- DOB Permits API (NYC) ---
   async function fetchPermitsByAddress(houseNum, street) {
     var dateFloor = buildYearsAgo(2);
     var where = "house__='" + houseNum + "' AND upper(street_name)='" + street + "' AND filing_date > '" + dateFloor + "'";
@@ -249,7 +304,7 @@
     }
   }
 
-  // --- DOB Complaints API ---
+  // --- DOB Complaints API (NYC) ---
   async function fetchComplaintsByAddress(houseNum, street) {
     var dateFloor = buildYearsAgo(3);
     var where = "house_number='" + houseNum + "' AND upper(house_street)='" + street + "' AND date_entered > '" + dateFloor + "'";
@@ -257,8 +312,100 @@
     return gmFetch(url);
   }
 
+  // --- NJ Parcel API (MOD-IV) ---
+  async function fetchNJParcelByAddress(address, municipality) {
+    // Build search address: just the street part (e.g. "123 MAIN ST")
+    var munFilter = municipality.toUpperCase();
+    var addrSearch = address.toUpperCase().replace(/\s+/g, ' ').trim();
+    var url = NJ_PARCELS_BASE +
+      '?where=' + encodeURIComponent("MUN_NAME LIKE '%" + munFilter + "%' AND PROP_LOC LIKE '%" + addrSearch + "%'") +
+      '&outFields=' + encodeURIComponent('PAMS_PIN,PROP_LOC,BLDG_DESC,LAND_DESC,YR_CONSTR,CALC_ACRE') +
+      '&returnGeometry=true&f=json&resultRecordCount=5';
+    var result = await gmFetch(url);
+    return (result && result.features) ? result.features : [];
+  }
+
+  async function fetchNJParcelsNearby(lat, lon) {
+    var url = NJ_PARCELS_BASE +
+      '?geometry=' + lon + ',' + lat +
+      '&geometryType=esriGeometryPoint&inSR=4326' +
+      '&spatialRel=esriSpatialRelIntersects' +
+      '&distance=' + RADIUS_METERS + '&units=esriSRUnit_Meter' +
+      '&outFields=' + encodeURIComponent('PAMS_PIN,PROP_LOC,BLDG_DESC') +
+      '&returnGeometry=true&f=json&resultRecordCount=50';
+    var result = await gmFetch(url);
+    return (result && result.features) ? result.features : [];
+  }
+
+  // Extract block and lot from PAMS_PIN (format: "0906_BLOCK_LOT_QUAL" or similar)
+  function parsePamsPin(pamsPin) {
+    if (!pamsPin) return null;
+    var parts = pamsPin.split('_');
+    if (parts.length < 3) return null;
+    return { block: parts[1], lot: parts[2] };
+  }
+
+  // --- NJ Permits API ---
+  async function fetchNJPermitsByBlockLot(block, lot, municipality) {
+    var dateFloor = buildYearsAgo(2);
+    var munFilter = municipality.toUpperCase();
+    var where = "upper(muniname)='" + munFilter + "' AND block='" + block + "' AND lot='" + lot + "' AND permitdate > '" + dateFloor + "'";
+    var url = NJ_PERMITS_BASE + '?$where=' + encodeURIComponent(where) + '&$order=permitdate DESC&$limit=' + PERMIT_LIMIT;
+    return gmFetch(url);
+  }
+
+  // Normalize NJ permit to match the shape used by NYC permit rendering
+  function normalizeNJPermit(njPermit, parcelAddress) {
+    var rawType = (njPermit.permittype || '').trim();
+    var jobType = NJ_PERMIT_TYPE_MAP[rawType] || 'OT';
+    var statusCode = (njPermit.status || '').toUpperCase();
+    var statusLabel = NJ_STATUS_LABELS[statusCode] || statusCode || 'Unknown';
+
+    // Build a description from available fields
+    var descParts = [];
+    if (njPermit.permittypedesc) descParts.push(njPermit.permittypedesc);
+    if (njPermit.usegroupdesc) descParts.push('Use: ' + njPermit.usegroupdesc);
+    if (njPermit.squarefeet && njPermit.squarefeet !== '0') descParts.push(njPermit.squarefeet + ' sq ft');
+    if (njPermit.constcost && njPermit.constcost !== '0') {
+      var cost = parseFloat(njPermit.constcost);
+      if (cost > 0) descParts.push('Cost: $' + cost.toLocaleString());
+    }
+
+    // Certificate info
+    var certInfo = '';
+    if (njPermit.certtypedesc) certInfo = njPermit.certtypedesc;
+
+    return {
+      job_type: jobType,
+      permit_status: statusLabel,
+      filing_status: '',
+      filing_date: njPermit.permitdate || null,
+      job_description: descParts.join(' | '),
+      work_type: certInfo,
+      // Address from parcel data for display in nearby permits
+      house__: '',
+      street_name: parcelAddress || '',
+      // NJ-specific fields for dedup
+      _nj_permitno: njPermit.permitno || '',
+      _nj_block: njPermit.block || '',
+      _nj_lot: njPermit.lot || '',
+      _nj_source: 'NJ',
+    };
+  }
+
+  function isNJPermitActive(permit) {
+    // NJ: status=P means permit issued (active work), status=C means certificate (completed)
+    if (permit._nj_source === 'NJ') {
+      var statusLabel = (permit.permit_status || '').toLowerCase();
+      return statusLabel.indexOf('permit') >= 0;
+    }
+    return false;
+  }
+
   // --- Data processing ---
   function isPermitActive(permit) {
+    // NJ permits use different status logic
+    if (permit._nj_source === 'NJ') return isNJPermitActive(permit);
     var status = (permit.permit_status || '').toUpperCase();
     var filing = (permit.filing_status || '').toUpperCase();
     return status === 'ISSUED' || status === 'IN PROCESS' || status === 'RENEWED' ||
@@ -306,7 +453,9 @@
 
     var addressStr = '';
     if (showAddress) {
-      var addr = ((permit.house__ || '') + ' ' + (permit.street_name || '')).trim();
+      var addr = permit._nj_source === 'NJ'
+        ? (permit.street_name || '').trim()
+        : ((permit.house__ || '') + ' ' + (permit.street_name || '')).trim();
       if (addr) addressStr = '<span style="color:#62646A;margin-left:6px;">' + escapeHtml(addr) + '</span>';
     }
 
@@ -361,6 +510,12 @@
     '</div>';
   }
 
+  function createInfoNote(text) {
+    return '<div style="margin-top:12px;padding:10px 12px;background:#F5F5F5;border-radius:6px;font-size:12px;color:#62646A;">' +
+      escapeHtml(text) +
+    '</div>';
+  }
+
   function createCard(data) {
     var card = document.createElement('div');
     card.id = 'se-dob-permits';
@@ -373,12 +528,13 @@
     var complaintCount = data.complaints.length;
     var activePermits = data.buildingPermits.filter(isPermitActive).length + data.nearbyPermits.filter(isPermitActive).length;
     var activeComplaints = data.complaints.filter(isComplaintActive).length;
+    var isNJ = data.city && data.city !== 'NYC';
 
     // Summary line
     var summaryParts = [];
     if (activePermits > 0) summaryParts.push(activePermits + ' active permit' + (activePermits !== 1 ? 's' : '') + ' nearby');
-    if (activeComplaints > 0) summaryParts.push(activeComplaints + ' building complaint' + (activeComplaints !== 1 ? 's' : ''));
-    if (summaryParts.length === 0) summaryParts.push('No active permits or complaints');
+    if (!isNJ && activeComplaints > 0) summaryParts.push(activeComplaints + ' building complaint' + (activeComplaints !== 1 ? 's' : ''));
+    if (summaryParts.length === 0) summaryParts.push(isNJ ? 'No active permits found' : 'No active permits or complaints');
     var summaryText = summaryParts.join(' \u00B7 ');
 
     var errorHtml = '';
@@ -391,21 +547,30 @@
 
     var mainId = 'se-dob-main-' + Math.random().toString(36).slice(2, 8);
 
+    // Card title varies by city
+    var cardTitle = isNJ ? 'Construction Permits' : 'DOB Permits &amp; Complaints';
+
     // Build section HTML
     var buildingPermitRows = data.buildingPermits.map(function (p) { return createPermitRow(p, false); }).join('');
     var nearbyPermitRows = data.nearbyPermits.map(function (p) { return createPermitRow(p, true); }).join('');
-    var complaintRows = data.complaints.map(function (c) { return createComplaintRow(c); }).join('');
 
     var sectionsHtml =
       createCollapsibleSection('Active Permits \u2014 This Building', buildingPermitRows, buildingPermitCount, buildingPermitCount > 0) +
-      createCollapsibleSection('Active Permits \u2014 Nearby', nearbyPermitRows, nearbyPermitCount, nearbyPermitCount > 0 && nearbyPermitCount <= 5) +
-      createCollapsibleSection('DOB Complaints \u2014 This Building', complaintRows, complaintCount, complaintCount > 0 && complaintCount <= 5);
+      createCollapsibleSection('Active Permits \u2014 Nearby', nearbyPermitRows, nearbyPermitCount, nearbyPermitCount > 0 && nearbyPermitCount <= 5);
+
+    if (isNJ) {
+      // No complaints API for NJ - show info note
+      sectionsHtml += createInfoNote('Complaint data is not available for NJ municipalities. Only NYC DOB complaints are supported.');
+    } else {
+      var complaintRows = data.complaints.map(function (c) { return createComplaintRow(c); }).join('');
+      sectionsHtml += createCollapsibleSection('DOB Complaints \u2014 This Building', complaintRows, complaintCount, complaintCount > 0 && complaintCount <= 5);
+    }
 
     card.innerHTML =
       '<div id="' + mainId + '-header" style="cursor:pointer;user-select:none;">' +
         '<div style="display:flex;align-items:center;justify-content:space-between;">' +
           '<div style="font-size:16px;font-weight:700;color:#333;">' +
-            'DOB Permits &amp; Complaints' +
+            cardTitle +
             '<span id="' + mainId + '-toggle-hint" style="font-size:12px;color:#62646A;font-weight:400;margin-left:8px;">click to expand</span>' +
           '</div>' +
         '</div>' +
@@ -416,6 +581,7 @@
         sectionsHtml +
         '<div style="margin-top:10px;font-size:11px;color:#999;">' +
           'Cached \u00B7 fetched ' + cacheLabel +
+          (isNJ ? ' \u00B7 Source: NJ Construction Permit Data + MOD-IV Parcels' : '') +
         '</div>' +
       '</div>';
 
@@ -501,6 +667,145 @@
     }
   }
 
+  // --- NJ Pipeline ---
+  async function runNJPipeline(address, city) {
+    var municipality = getMunicipalityName(city);
+    var parsed = parseAddress(address);
+    if (!parsed) {
+      return {
+        buildingPermits: [],
+        nearbyPermits: [],
+        complaints: [],
+        city: city,
+        error: 'Could not parse address: "' + address + '"',
+      };
+    }
+
+    // Build a search string for parcel lookup: "123 MAIN ST"
+    var searchAddr = parsed.houseNum + ' ' + parsed.street;
+
+    // Step 1: Find the parcel for this address
+    var parcels = await fetchNJParcelByAddress(searchAddr, municipality).catch(function () { return []; });
+
+    var buildingPermits = [];
+    var buildingBlockLots = new Set();
+
+    if (parcels.length > 0) {
+      // Extract block/lot from the first matching parcel
+      var primaryParcel = parcels[0];
+      var pamsPin = primaryParcel.attributes ? primaryParcel.attributes.PAMS_PIN : null;
+      var blockLot = parsePamsPin(pamsPin);
+
+      if (blockLot) {
+        buildingBlockLots.add(blockLot.block + '_' + blockLot.lot);
+        var parcelAddr = primaryParcel.attributes ? (primaryParcel.attributes.PROP_LOC || '') : '';
+        var njPermitsRaw = await fetchNJPermitsByBlockLot(blockLot.block, blockLot.lot, municipality).catch(function () { return []; });
+        buildingPermits = njPermitsRaw.map(function (p) { return normalizeNJPermit(p, parcelAddr); });
+      }
+    }
+
+    // Step 2: Get nearby parcels via geocoding + spatial query
+    var nearbyPermits = [];
+    var coords = await geocode(address);
+    if (coords) {
+      var nearbyParcels = await fetchNJParcelsNearby(coords.lat, coords.lon).catch(function () { return []; });
+
+      // Collect unique block/lots from nearby parcels (excluding the building's own)
+      var nearbyBlockLots = {};
+      for (var i = 0; i < nearbyParcels.length; i++) {
+        var np = nearbyParcels[i];
+        var npPin = np.attributes ? np.attributes.PAMS_PIN : null;
+        var npBl = parsePamsPin(npPin);
+        if (!npBl) continue;
+        var blKey = npBl.block + '_' + npBl.lot;
+        if (buildingBlockLots.has(blKey)) continue; // skip building's own parcel
+        if (!nearbyBlockLots[blKey]) {
+          nearbyBlockLots[blKey] = {
+            block: npBl.block,
+            lot: npBl.lot,
+            address: np.attributes ? (np.attributes.PROP_LOC || '') : '',
+          };
+        }
+      }
+
+      // Fetch permits for each nearby block/lot (limit to avoid too many requests)
+      var nearbyEntries = Object.values(nearbyBlockLots).slice(0, 10);
+      var nearbyPromises = nearbyEntries.map(function (entry) {
+        return fetchNJPermitsByBlockLot(entry.block, entry.lot, municipality)
+          .then(function (permits) {
+            return permits
+              .map(function (p) { return normalizeNJPermit(p, entry.address); })
+              .filter(function (p) { return MAJOR_JOB_TYPES.has(p.job_type); }); // Only major types for nearby
+          })
+          .catch(function () { return []; });
+      });
+
+      var nearbyResults = await Promise.all(nearbyPromises);
+      for (var j = 0; j < nearbyResults.length; j++) {
+        nearbyPermits = nearbyPermits.concat(nearbyResults[j]);
+      }
+    }
+
+    return {
+      buildingPermits: sortPermits(buildingPermits),
+      nearbyPermits: sortPermits(nearbyPermits),
+      complaints: [],
+      city: city,
+      address: address,
+    };
+  }
+
+  // --- NYC Pipeline ---
+  async function runNYCPipeline(address) {
+    var parsed = parseAddress(address);
+    if (!parsed) {
+      return {
+        buildingPermits: [],
+        nearbyPermits: [],
+        complaints: [],
+        city: 'NYC',
+        error: 'Could not parse address: "' + address + '"',
+      };
+    }
+
+    // Geocode for nearby permits
+    var coords = await geocode(address);
+
+    // Fetch building permits, nearby permits, and complaints in parallel
+    var promises = [
+      fetchPermitsByAddress(parsed.houseNum, parsed.street).catch(function () { return []; }),
+      coords ? fetchPermitsNearby(coords.lat, coords.lon).catch(function () { return []; }) : Promise.resolve([]),
+      fetchComplaintsByAddress(parsed.houseNum, parsed.street).catch(function () { return []; }),
+    ];
+
+    var results = await Promise.all(promises);
+    var buildingPermitsRaw = results[0];
+    var nearbyPermitsRaw = results[1];
+    var complaintsRaw = results[2];
+
+    // Deduplicate: remove building permits from nearby results
+    var buildingKeys = new Set(buildingPermitsRaw.map(function (p) {
+      return (p.job__ || '') + '_' + (p.permit_sequence__ || '');
+    }));
+    // Also match by address
+    var buildingAddr = (parsed.houseNum + ' ' + parsed.street).toUpperCase();
+    var nearbyOnly = nearbyPermitsRaw.filter(function (p) {
+      var key = (p.job__ || '') + '_' + (p.permit_sequence__ || '');
+      if (buildingKeys.has(key)) return false;
+      var pAddr = ((p.house__ || '') + ' ' + (p.street_name || '')).toUpperCase().replace(/\s+/g, ' ').trim();
+      if (pAddr === buildingAddr) return false;
+      return true;
+    });
+
+    return {
+      buildingPermits: sortPermits(buildingPermitsRaw),
+      nearbyPermits: sortPermits(nearbyOnly),
+      complaints: sortComplaints(complaintsRaw),
+      city: 'NYC',
+      address: address,
+    };
+  }
+
   // --- Main ---
   async function main() {
     var address = getAddress();
@@ -508,6 +813,8 @@
       console.warn('[DOBPermits] Could not extract address from page');
       return;
     }
+
+    var city = detectCity();
 
     var cacheKey = hashString(address);
     var cached = getCached(cacheKey);
@@ -523,61 +830,18 @@
       'font-family:"Source Sans Pro","Helvetica Neue",Helvetica,Arial,sans-serif;' +
       'border:1px solid #E6E6E6;border-radius:8px;padding:16px 20px;margin:16px 0;' +
       'background:#FFFFFF;color:#62646A;font-size:14px;';
-    loadingCard.textContent = 'Loading DOB permit & complaint data\u2026';
+    loadingCard.textContent = city === 'NYC'
+      ? 'Loading DOB permit & complaint data\u2026'
+      : 'Loading NJ construction permit data\u2026';
     injectCard(loadingCard);
 
     try {
-      var parsed = parseAddress(address);
-      if (!parsed) {
-        var errorData = {
-          buildingPermits: [],
-          nearbyPermits: [],
-          complaints: [],
-          error: 'Could not parse address: "' + address + '"',
-        };
-        injectCard(createCard(errorData));
-        return;
+      var result;
+      if (city === 'NYC') {
+        result = await runNYCPipeline(address);
+      } else {
+        result = await runNJPipeline(address, city);
       }
-
-      // Geocode for nearby permits
-      var coords = await geocode(address);
-
-      // Fetch building permits, nearby permits, and complaints in parallel
-      var promises = [
-        fetchPermitsByAddress(parsed.houseNum, parsed.street).catch(function () { return []; }),
-        coords ? fetchPermitsNearby(coords.lat, coords.lon).catch(function () { return []; }) : Promise.resolve([]),
-        fetchComplaintsByAddress(parsed.houseNum, parsed.street).catch(function () { return []; }),
-      ];
-
-      var results = await Promise.all(promises);
-      var buildingPermitsRaw = results[0];
-      var nearbyPermitsRaw = results[1];
-      var complaintsRaw = results[2];
-
-      // Deduplicate: remove building permits from nearby results
-      var buildingKeys = new Set(buildingPermitsRaw.map(function (p) {
-        return (p.job__ || '') + '_' + (p.permit_sequence__ || '');
-      }));
-      // Also match by address
-      var buildingAddr = (parsed.houseNum + ' ' + parsed.street).toUpperCase();
-      var nearbyOnly = nearbyPermitsRaw.filter(function (p) {
-        var key = (p.job__ || '') + '_' + (p.permit_sequence__ || '');
-        if (buildingKeys.has(key)) return false;
-        var pAddr = ((p.house__ || '') + ' ' + (p.street_name || '')).toUpperCase().replace(/\s+/g, ' ').trim();
-        if (pAddr === buildingAddr) return false;
-        return true;
-      });
-
-      var buildingPermits = sortPermits(buildingPermitsRaw);
-      var nearbyPermits = sortPermits(nearbyOnly);
-      var complaints = sortComplaints(complaintsRaw);
-
-      var result = {
-        buildingPermits: buildingPermits,
-        nearbyPermits: nearbyPermits,
-        complaints: complaints,
-        address: address,
-      };
 
       setCache(cacheKey, result);
       injectCard(createCard(result));
@@ -587,7 +851,10 @@
         buildingPermits: [],
         nearbyPermits: [],
         complaints: [],
-        error: 'Failed to load DOB data. Try refreshing.',
+        city: city,
+        error: city === 'NYC'
+          ? 'Failed to load DOB data. Try refreshing.'
+          : 'Failed to load NJ permit data. Try refreshing.',
       };
       injectCard(createCard(errData));
     }
