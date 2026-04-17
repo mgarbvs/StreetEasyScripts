@@ -28,10 +28,11 @@
 
   // --- City detection ---
   function detectCity() {
-    var title = document.title.toLowerCase();
-    if (/jersey\s*city/i.test(title)) return 'JC';
-    if (/hoboken/i.test(title)) return 'HOBOKEN';
-    // Also check URL
+    const crumbs = document.querySelectorAll('nav[aria-label="breadcrumb"] a');
+    for (const a of crumbs) {
+      if (/\/jersey-city\b/.test(a.href)) return 'JC';
+      if (/\/hoboken\b/.test(a.href)) return 'HOBOKEN';
+    }
     var url = window.location.href.toLowerCase();
     if (/jersey[_-]city|jersey%20city/i.test(url)) return 'JC';
     if (/hoboken/i.test(url)) return 'HOBOKEN';

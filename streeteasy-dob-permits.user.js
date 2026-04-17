@@ -73,6 +73,12 @@
 
   // --- City Detection ---
   function detectCity() {
+    var addr = getBuildingAddress();
+    if (addr && /,\s*NJ\s+\d{5}/.test(addr)) {
+      if (/jersey\s*city/i.test(addr)) return 'JC';
+      if (/hoboken/i.test(addr)) return 'HOBOKEN';
+      return 'JC';
+    }
     var titleMatch = document.title.match(/\s+in\s+(.+?)(?:\s*\||$)/);
     if (titleMatch) {
       var neighborhood = titleMatch[1].trim();
@@ -163,7 +169,25 @@
   }
 
   // --- Address extraction ---
+  function getBuildingAddress() {
+    var headings = document.querySelectorAll('h2');
+    for (var i = 0; i < headings.length; i++) {
+      if (/about the building/i.test(headings[i].textContent)) {
+        var section = headings[i].parentElement;
+        if (!section) continue;
+        var paragraphs = section.querySelectorAll('p');
+        for (var j = 0; j < paragraphs.length; j++) {
+          var text = paragraphs[j].textContent.trim();
+          if (/,\s*[A-Z]{2}\s+\d{5}/.test(text)) return text;
+        }
+      }
+    }
+    return null;
+  }
+
   function getAddress() {
+    var buildingAddr = getBuildingAddress();
+    if (buildingAddr) return buildingAddr;
     var title = document.title;
     var match = title.match(/^(.+?)\s+in\s+/);
     var suffix = getAddressSuffix();

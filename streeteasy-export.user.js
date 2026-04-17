@@ -81,6 +81,12 @@
 
   // --- City detection ---
   function detectCity() {
+    var addr = getBuildingAddress();
+    if (addr && /,\s*NJ\s+\d{5}/.test(addr)) {
+      if (/jersey\s*city/i.test(addr)) return 'JC';
+      if (/hoboken/i.test(addr)) return 'HOBOKEN';
+      return 'JC';
+    }
     var titleMatch = document.title.match(/\s+in\s+(.+?)(?:\s*\||$)/);
     if (titleMatch) {
       var neighborhood = titleMatch[1].trim();
@@ -97,8 +103,26 @@
     return ', New York, NY';
   }
 
-  // --- Address extraction (same as other scripts) ---
+  // --- Address extraction ---
+  function getBuildingAddress() {
+    const headings = document.querySelectorAll('h2');
+    for (const h of headings) {
+      if (/about the building/i.test(h.textContent)) {
+        const section = h.parentElement;
+        if (!section) continue;
+        const paragraphs = section.querySelectorAll('p');
+        for (const p of paragraphs) {
+          const text = p.textContent.trim();
+          if (/,\s*[A-Z]{2}\s+\d{5}/.test(text)) return text;
+        }
+      }
+    }
+    return null;
+  }
+
   function getAddress() {
+    const buildingAddr = getBuildingAddress();
+    if (buildingAddr) return buildingAddr;
     const title = document.title;
     const match = title.match(/^(.+?)\s+in\s+/);
     if (match) return match[1].trim() + getAddressSuffix();
