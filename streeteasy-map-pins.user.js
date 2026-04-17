@@ -1,13 +1,14 @@
 // ==UserScript==
 // @name         StreetEasy Map Pins
 // @namespace    https://streeteasy.com/
-// @version      2.0.0
+// @version      2.1.0
 // @description  Configurable custom pins on StreetEasy maps with in-browser settings
 // @match        https://streeteasy.com/for-rent/*
 // @match        https://streeteasy.com/for-sale/*
 // @match        https://streeteasy.com/building/*
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        unsafeWindow
 // @run-at       document-start
 // @updateURL    https://raw.githubusercontent.com/mgarbvs/StreetEasyScripts/main/streeteasy-map-pins.user.js
 // @downloadURL  https://raw.githubusercontent.com/mgarbvs/StreetEasyScripts/main/streeteasy-map-pins.user.js
@@ -15,6 +16,8 @@
 
 (function () {
   'use strict';
+
+  const W = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
 
   const PINS_KEY = 'se_custom_pins';
   const VISIBLE_KEY = 'se_pins_visible';
@@ -57,23 +60,24 @@
   // ── Google Maps Markers ──
 
   function addGoogleMarkers(map) {
-    if (typeof google === 'undefined' || !google.maps) return;
+    const gm = W.google && W.google.maps;
+    if (!gm) return;
     log('Adding', pins.length, 'Google Maps markers');
 
     for (const pin of pins) {
-      const marker = new google.maps.Marker({
+      const marker = new gm.Marker({
         position: { lat: pin.lat, lng: pin.lon },
         map: visible ? map : null,
         icon: {
           url: pinDataURL(pin.color),
-          scaledSize: new google.maps.Size(28, 40),
-          anchor: new google.maps.Point(14, 40),
+          scaledSize: new gm.Size(28, 40),
+          anchor: new gm.Point(14, 40),
         },
         title: pin.label,
         zIndex: 99999,
       });
 
-      const info = new google.maps.InfoWindow({
+      const info = new gm.InfoWindow({
         content: `<div style="font:600 13px/1.3 system-ui,sans-serif;padding:2px 4px;white-space:nowrap">
           <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${pin.color};margin-right:5px;vertical-align:middle"></span>
           ${pin.label}</div>`,
@@ -115,8 +119,9 @@
       el.addEventListener('mouseenter', () => { tooltip.style.display = 'block'; });
       el.addEventListener('mouseleave', () => { tooltip.style.display = 'none'; });
 
-      if (typeof mapboxgl !== 'undefined' && mapboxgl.Marker) {
-        const marker = new mapboxgl.Marker({ element: el, anchor: 'bottom' })
+      const mbgl = W.mapboxgl;
+      if (mbgl && mbgl.Marker) {
+        const marker = new mbgl.Marker({ element: el, anchor: 'bottom' })
           .setLngLat([pin.lon, pin.lat]);
         if (visible) marker.addTo(map);
 
@@ -189,44 +194,46 @@
     updateUI();
   }
 
-  // ── Constructor Hooks ──
+  // ── Constructor Hooks (on page's window) ──
 
   function hookGoogleMaps() {
-    if (typeof google === 'undefined' || !google.maps || !google.maps.Map) return false;
-    if (google.maps.Map.__sePinsHooked) return true;
+    const gm = W.google && W.google.maps;
+    if (!gm || !gm.Map) return false;
+    if (gm.Map.__sePinsHooked) return true;
 
-    const Orig = google.maps.Map;
-    google.maps.Map = function (div, opts) {
+    const Orig = gm.Map;
+    gm.Map = function (div, opts) {
       const inst = new Orig(div, opts);
       log('Google Maps instance created via hook');
       setTimeout(() => captureMap(inst, 'google'), 300);
       return inst;
     };
-    google.maps.Map.prototype = Orig.prototype;
+    gm.Map.prototype = Orig.prototype;
     Object.keys(Orig).forEach(k => {
-      try { google.maps.Map[k] = Orig[k]; } catch (e) {}
+      try { gm.Map[k] = Orig[k]; } catch (e) {}
     });
-    google.maps.Map.__sePinsHooked = true;
+    gm.Map.__sePinsHooked = true;
     log('Google Maps constructor hooked');
     return true;
   }
 
   function hookMapbox() {
-    if (typeof mapboxgl === 'undefined' || !mapboxgl.Map) return false;
-    if (mapboxgl.Map.__sePinsHooked) return true;
+    const mbgl = W.mapboxgl;
+    if (!mbgl || !mbgl.Map) return false;
+    if (mbgl.Map.__sePinsHooked) return true;
 
-    const Orig = mapboxgl.Map;
-    mapboxgl.Map = function (opts) {
+    const Orig = mbgl.Map;
+    mbgl.Map = function (opts) {
       const inst = new Orig(opts);
       log('Mapbox instance created via hook');
       inst.on('load', () => captureMap(inst, 'mapbox'));
       return inst;
     };
-    mapboxgl.Map.prototype = Orig.prototype;
+    mbgl.Map.prototype = Orig.prototype;
     Object.keys(Orig).forEach(k => {
-      try { mapboxgl.Map[k] = Orig[k]; } catch (e) {}
+      try { mbgl.Map[k] = Orig[k]; } catch (e) {}
     });
-    mapboxgl.Map.__sePinsHooked = true;
+    mbgl.Map.__sePinsHooked = true;
     log('Mapbox constructor hooked');
     return true;
   }
@@ -237,10 +244,24 @@
     const divs = document.querySelectorAll('.gm-style');
     for (const div of divs) {
       let el = div;
-      while (el && !el.__gm) el = el.parentElement;
-      if (el && el.__gm && el.__gm.map && !knownMapSet.has(el.__gm.map)) {
-        log('Found Google Maps in DOM');
-        captureMap(el.__gm.map, 'google');
+      for (let i = 0; i < 10 && el; i++, el = el.parentElement) {
+        if (el.__gm && el.__gm.map && !knownMapSet.has(el.__gm.map)) {
+          log('Found Google Maps in DOM via __gm');
+          captureMap(el.__gm.map, 'google');
+          return;
+        }
+        for (const key of Object.getOwnPropertyNames(el)) {
+          try {
+            const val = el[key];
+            if (val && typeof val === 'object' && typeof val.getCenter === 'function'
+                && typeof val.getZoom === 'function' && typeof val.getBounds === 'function'
+                && !knownMapSet.has(val)) {
+              log('Found Google Maps in DOM via property:', key);
+              captureMap(val, 'google');
+              return;
+            }
+          } catch (e) {}
+        }
       }
     }
   }
@@ -269,43 +290,66 @@
     findMapboxInDOM();
   }
 
-  // ── Early Global Hooks (document-start) ──
+  // ── Early Global Hooks (document-start, on page's window) ──
+
+  function watchForMapsMap(mapsObj) {
+    let _Map = mapsObj.Map;
+    try {
+      Object.defineProperty(mapsObj, 'Map', {
+        configurable: true, enumerable: true,
+        get() { return _Map; },
+        set(v) { _Map = v; log('google.maps.Map assigned'); hookGoogleMaps(); },
+      });
+    } catch (e) { log('Could not trap google.maps.Map:', e.message); }
+  }
+
+  function watchForGoogleMaps(googleObj) {
+    let _maps = googleObj.maps;
+    if (_maps && _maps.Map) { hookGoogleMaps(); return; }
+    if (_maps) { watchForMapsMap(_maps); return; }
+    try {
+      Object.defineProperty(googleObj, 'maps', {
+        configurable: true, enumerable: true,
+        get() { return _maps; },
+        set(v) {
+          _maps = v;
+          log('google.maps assigned');
+          if (_maps && _maps.Map) hookGoogleMaps();
+          else if (_maps) watchForMapsMap(_maps);
+        },
+      });
+    } catch (e) { log('Could not trap google.maps:', e.message); }
+  }
 
   function setupEarlyHooks() {
-    if (typeof google !== 'undefined' && google.maps) {
+    // Google Maps — hook on the PAGE's window
+    if (W.google && W.google.maps && W.google.maps.Map) {
       hookGoogleMaps();
+    } else if (W.google) {
+      watchForGoogleMaps(W.google);
     } else {
-      let _google = window.google;
+      let _google = W.google;
       try {
-        Object.defineProperty(window, 'google', {
+        Object.defineProperty(W, 'google', {
           configurable: true, enumerable: true,
           get() { return _google; },
           set(val) {
             _google = val;
             log('window.google assigned');
-            if (_google && _google.maps && _google.maps.Map) {
-              hookGoogleMaps();
-            } else if (_google && _google.maps) {
-              let _Map = _google.maps.Map;
-              try {
-                Object.defineProperty(_google.maps, 'Map', {
-                  configurable: true, enumerable: true,
-                  get() { return _Map; },
-                  set(v) { _Map = v; log('google.maps.Map assigned'); hookGoogleMaps(); },
-                });
-              } catch (e) { log('Could not trap google.maps.Map:', e.message); }
-            }
+            if (_google) watchForGoogleMaps(_google);
           },
         });
+        log('Early hook installed on window.google');
       } catch (e) { log('Early google hook failed:', e.message); }
     }
 
-    if (typeof mapboxgl !== 'undefined') {
+    // Mapbox — hook on the PAGE's window
+    if (W.mapboxgl && W.mapboxgl.Map) {
       hookMapbox();
-    } else {
-      let _mapboxgl = window.mapboxgl;
+    } else if (!W.mapboxgl) {
+      let _mapboxgl = W.mapboxgl;
       try {
-        Object.defineProperty(window, 'mapboxgl', {
+        Object.defineProperty(W, 'mapboxgl', {
           configurable: true, enumerable: true,
           get() { return _mapboxgl; },
           set(val) {
