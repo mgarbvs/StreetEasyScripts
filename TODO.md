@@ -9,7 +9,8 @@
 - [x] Script 5: Export to Google Sheets ("Save to Compare" button, Apps Script webhook)
 
 ## Next Up
-
+### Updating the todo list with what has been compelted
+### Enabling users to change the floor of the sunlight estimator.
 ### Adding pins to the StreetEasy map view based on commute / special locations.
 
 ### [Nice to have] Support for an Inclusive OR for Laundry in Unit / Building 
