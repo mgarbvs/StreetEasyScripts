@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         StreetEasy Export to Notion
 // @namespace    https://streeteasy.com/
-// @version      2.0.0
+// @version      2.1.0
 // @description  Save StreetEasy listing data (price, commute, 311, HPD, DOB) to a Notion database
 // @match        https://streeteasy.com/building/*
 // @match        https://streeteasy.com/rental/*
@@ -79,13 +79,31 @@
     return !!getSavedUrls()[url];
   }
 
+  // --- City detection ---
+  function detectCity() {
+    var titleMatch = document.title.match(/\s+in\s+(.+?)(?:\s*\||$)/);
+    if (titleMatch) {
+      var neighborhood = titleMatch[1].trim();
+      if (/jersey\s*city/i.test(neighborhood)) return 'JC';
+      if (/hoboken/i.test(neighborhood)) return 'HOBOKEN';
+    }
+    return 'NYC';
+  }
+
+  function getAddressSuffix() {
+    var city = detectCity();
+    if (city === 'JC') return ', Jersey City, NJ';
+    if (city === 'HOBOKEN') return ', Hoboken, NJ';
+    return ', New York, NY';
+  }
+
   // --- Address extraction (same as other scripts) ---
   function getAddress() {
     const title = document.title;
     const match = title.match(/^(.+?)\s+in\s+/);
-    if (match) return match[1].trim() + ', New York, NY';
+    if (match) return match[1].trim() + getAddressSuffix();
     const h1 = document.querySelector('h1');
-    if (h1) return h1.textContent.trim() + ', New York, NY';
+    if (h1) return h1.textContent.trim() + getAddressSuffix();
     return null;
   }
 
@@ -159,7 +177,7 @@
       const secondLast = crumbArr[crumbArr.length - 2];
       const text = secondLast.textContent.trim();
       // If it doesn't look like a neighborhood name, it might be the building
-      if (text && !/manhattan|brooklyn|queens|bronx|staten/i.test(text)) {
+      if (text && !/manhattan|brooklyn|queens|bronx|staten|jersey\s*city|hoboken|bayonne|weehawken/i.test(text)) {
         return text;
       }
     }
@@ -232,7 +250,7 @@
 
     const priceRaw = getPrice().replace(/[$,]/g, '');
     const buildingName = getBuildingName();
-    const addrLabel = address.replace(/, New York, NY$/, '');
+    const addrLabel = address.replace(/, (New York, NY|Jersey City, NJ|Hoboken, NJ)$/i, '');
 
     return {
       address: buildingName ? `${buildingName} — ${addrLabel}` : addrLabel,

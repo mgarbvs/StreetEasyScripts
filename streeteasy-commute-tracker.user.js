@@ -10,6 +10,7 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @connect      geosearch.planninglabs.nyc
+// @connect      nominatim.openstreetmap.org
 // @run-at       document-idle
 // @updateURL    https://raw.githubusercontent.com/mgarbvs/StreetEasyScripts/main/streeteasy-commute-tracker.user.js
 // @downloadURL  https://raw.githubusercontent.com/mgarbvs/StreetEasyScripts/main/streeteasy-commute-tracker.user.js
@@ -55,6 +56,24 @@
   let currentDestIndex = 0;
   let currentAddress = null;
   let currentCoords = null;
+
+  // --- City detection ---
+  function detectCity() {
+    var titleMatch = document.title.match(/\s+in\s+(.+?)(?:\s*\||$)/);
+    if (titleMatch) {
+      var neighborhood = titleMatch[1].trim();
+      if (/jersey\s*city/i.test(neighborhood)) return 'JC';
+      if (/hoboken/i.test(neighborhood)) return 'HOBOKEN';
+    }
+    return 'NYC';
+  }
+
+  function getAddressSuffix() {
+    var city = detectCity();
+    if (city === 'JC') return ', Jersey City, NJ';
+    if (city === 'HOBOKEN') return ', Hoboken, NJ';
+    return ', New York, NY';
+  }
 
   // --- Helpers ---
   function hashString(str) {
@@ -151,9 +170,9 @@
   function getAddress() {
     const title = document.title;
     const match = title.match(/^(.+?)\s+in\s+/);
-    if (match) return match[1].trim() + ', New York, NY';
+    if (match) return match[1].trim() + getAddressSuffix();
     const h1 = document.querySelector('h1');
-    if (h1) return h1.textContent.trim() + ', New York, NY';
+    if (h1) return h1.textContent.trim() + getAddressSuffix();
     return null;
   }
 
@@ -168,29 +187,51 @@
   }
 
   async function geocode(address) {
-    const key = geocodeCacheKey(address);
-    const cached = getCached(key, GEOCODE_TTL_MS);
+    var key = geocodeCacheKey(address);
+    var cached = getCached(key, GEOCODE_TTL_MS);
     if (cached) {
       console.debug(`[CommuteTracker] geocode cache HIT for "${address}"`);
       return { lat: cached.lat, lon: cached.lon };
     }
-    console.debug(`[CommuteTracker] geocode cache MISS for "${address}" — fetching NYC geocoder`);
+    console.debug(`[CommuteTracker] geocode cache MISS for "${address}" — fetching`);
     const t0 = performance.now();
-    const cleaned = stripUnit(address);
-    const url = `${NYC_GEOCODER_BASE}/v2/search?text=${encodeURIComponent(cleaned)}&size=1`;
-    const result = await gmFetch(url);
+    var cleaned = stripUnit(address);
+    var city = detectCity();
+    var coords;
+
+    if (city === 'NYC') {
+      // Use NYC Planning Labs geocoder (more accurate for NYC)
+      var url = NYC_GEOCODER_BASE + '/v2/search?text=' + encodeURIComponent(cleaned) + '&size=1';
+      var result = await gmFetch(url);
+      if (result && result.features && result.features.length > 0) {
+        var [lon, lat] = result.features[0].geometry.coordinates;
+        coords = { lat, lon };
+      }
+    }
+
+    if (!coords) {
+      // Fallback to Nominatim (works for all US addresses)
+      var nomUrl = 'https://nominatim.openstreetmap.org/search?format=json&q=' + encodeURIComponent(cleaned) + '&limit=1&countrycodes=us';
+      var results = await gmFetch(nomUrl);
+      if (results && results.length > 0) {
+        coords = { lat: parseFloat(results[0].lat), lon: parseFloat(results[0].lon) };
+      }
+    }
+
     console.debug(`[CommuteTracker] geocode total ${Math.round(performance.now() - t0)}ms`);
-    if (!result || !result.features || result.features.length === 0) return null;
-    const [lon, lat] = result.features[0].geometry.coordinates;
-    const coords = { lat, lon };
-    setCache(key, coords);
-    return coords;
+    if (coords) {
+      setCache(key, coords);
+      return coords;
+    }
+    return null;
   }
 
   function getWalkingRoute(fromLat, fromLon, toLat, toLon) {
-    // Manhattan street grid ~30% longer than straight-line distance
-    const distance = haversineDistance(fromLat, fromLon, toLat, toLon) * 1.3;
-    const duration = distance / 1.4; // 1.4 m/s walking speed
+    var city = detectCity();
+    // Manhattan street grid ~30% longer; JC/NJ is less grid-like ~20%
+    var gridFactor = city === 'NYC' ? 1.3 : 1.2;
+    var distance = haversineDistance(fromLat, fromLon, toLat, toLon) * gridFactor;
+    var duration = distance / 1.4; // 1.4 m/s walking speed
     return { distance, duration, estimated: true };
   }
 
