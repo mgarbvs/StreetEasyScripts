@@ -204,11 +204,16 @@
     const maxLon = lon + dLon;
 
     // Use SoQL bounding box query on latitude/longitude fields
-    const where = `latitude >= ${minLat} AND latitude <= ${maxLat} AND longitude >= ${minLon} AND longitude <= ${maxLon} AND heightroof > 0`;
-    const select = 'bbl,address,numfloors,heightroof,latitude,longitude';
+    const where = `latitude >= ${minLat} AND latitude <= ${maxLat} AND longitude >= ${minLon} AND longitude <= ${maxLon} AND numfloors > 0`;
+    const select = 'bbl,address,numfloors,latitude,longitude';
     const url = `${PLUTO_BASE}?$where=${encodeURIComponent(where)}&$select=${encodeURIComponent(select)}&$limit=${BUILDING_LIMIT}`;
 
-    return gmFetch(url);
+    const results = await gmFetch(url);
+    if (!Array.isArray(results)) return [];
+    for (const b of results) {
+      b.heightroof = (parseFloat(b.numfloors) || 0) * FT_PER_FLOOR;
+    }
+    return results;
   }
 
   // --- NJ MOD-IV data fetching ---
