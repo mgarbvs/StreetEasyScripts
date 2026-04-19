@@ -156,12 +156,16 @@
       addBadge(card);
     }
 
-    // Record the click when the user opens the listing (links open in new tab)
-    card.addEventListener('click', (e) => {
+    // Record the click when the user opens the listing. Listen for `auxclick`
+    // too so middle-click (open in new tab) is captured — plain `click` only
+    // fires for the primary button.
+    const onOpen = (e) => {
       if (!e.target.closest('a[href*="/building/"]')) return;
       markViewed(key);
       addBadge(card);
-    }, { capture: true });
+    };
+    card.addEventListener('click', onOpen, { capture: true });
+    card.addEventListener('auxclick', onOpen, { capture: true });
   }
 
   // --- On a building detail page, record it immediately ---
